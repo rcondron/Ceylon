@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Crown of Ceylon</title>
+  <style>
+    @font-face {
+      font-family: 'GameFont';
+      src: local('Georgia'), local('Times New Roman');
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #1a1410;
+      overflow: hidden;
+      font-family: Georgia, 'Times New Roman', serif;
+      color: #d4c5a0;
+      cursor: default;
+      user-select: none;
+    }
+
+    #game-canvas {
+      display: block;
+      image-rendering: pixelated;
+      image-rendering: crisp-edges;
+    }
+
+    #minimap-canvas {
+      position: fixed;
+      bottom: 12px;
+      right: 12px;
+      border: 2px solid #5c4a2a;
+      background: #0a0806;
+      cursor: pointer;
+    }
+
+    /* ── HUD ───────────────────────────────────────────── */
+
+    #hud-top {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 36px;
+      background: linear-gradient(180deg, rgba(40,30,15,0.95) 0%, rgba(30,22,10,0.85) 100%);
+      border-bottom: 1px solid #5c4a2a;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 20px;
+      font-size: 13px;
+      z-index: 10;
+    }
+
+    .resource-item {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    .resource-icon {
+      width: 16px;
+      height: 16px;
+      display: inline-block;
+    }
+
+    .resource-value {
+      color: #e8d9b0;
+      font-weight: bold;
+      min-width: 30px;
+    }
+
+    .resource-label {
+      color: #8a7a5a;
+      font-size: 11px;
+    }
+
+    /* ── Selection Panel ───────────────────────────────── */
+
+    #selection-panel {
+      position: fixed;
+      bottom: 12px;
+      left: 12px;
+      min-width: 240px;
+      background: rgba(30,22,10,0.92);
+      border: 1px solid #5c4a2a;
+      padding: 10px;
+      font-size: 12px;
+      display: none;
+      z-index: 10;
+    }
+
+    #selection-panel h3 {
+      color: #c8b88a;
+      font-size: 14px;
+      margin-bottom: 6px;
+      border-bottom: 1px solid #3a2e1a;
+      padding-bottom: 4px;
+    }
+
+    #selection-info {
+      line-height: 1.6;
+    }
+
+    /* ── Action Bar ────────────────────────────────────── */
+
+    #action-bar {
+      position: fixed;
+      bottom: 12px;
+      left: 260px;
+      display: flex;
+      gap: 4px;
+      z-index: 10;
+    }
+
+    .action-btn {
+      width: 44px;
+      height: 44px;
+      background: rgba(40,30,15,0.9);
+      border: 1px solid #5c4a2a;
+      color: #c8b88a;
+      font-size: 11px;
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.15s;
+    }
+
+    .action-btn:hover {
+      background: rgba(60,45,20,0.95);
+      border-color: #8a7a5a;
+    }
+
+    .action-btn.active {
+      background: rgba(80,60,25,0.95);
+      border-color: #c8b88a;
+    }
+
+    .action-btn .icon {
+      font-size: 18px;
+      line-height: 1;
+    }
+
+    .action-btn .label {
+      font-size: 9px;
+      margin-top: 2px;
+    }
+
+    /* ── Notification ──────────────────────────────────── */
+
+    #notifications {
+      position: fixed;
+      top: 44px;
+      right: 12px;
+      width: 280px;
+      z-index: 20;
+    }
+
+    .notification {
+      background: rgba(30,22,10,0.92);
+      border: 1px solid #5c4a2a;
+      padding: 8px 12px;
+      margin-bottom: 4px;
+      font-size: 12px;
+      animation: notifSlide 0.3s ease;
+      transition: opacity 0.5s;
+    }
+
+    .notification.discovery {
+      border-color: #c8a832;
+      background: rgba(50,40,15,0.95);
+    }
+
+    @keyframes notifSlide {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+
+    /* ── Market Panel ──────────────────────────────────── */
+
+    #market-panel {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 420px;
+      background: rgba(25,18,8,0.97);
+      border: 2px solid #5c4a2a;
+      padding: 16px;
+      display: none;
+      z-index: 30;
+    }
+
+    #market-panel h2 {
+      color: #c8b88a;
+      font-size: 16px;
+      text-align: center;
+      margin-bottom: 12px;
+      border-bottom: 1px solid #3a2e1a;
+      padding-bottom: 8px;
+    }
+
+    .market-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 0;
+      border-bottom: 1px solid #2a2010;
+    }
+
+    .market-resource {
+      width: 90px;
+      text-transform: capitalize;
+    }
+
+    .market-price {
+      color: #e8d9b0;
+      width: 60px;
+      text-align: right;
+    }
+
+    .market-stock {
+      color: #8a7a5a;
+      width: 40px;
+      text-align: center;
+    }
+
+    .market-sell-btn {
+      background: rgba(60,45,20,0.9);
+      border: 1px solid #5c4a2a;
+      color: #c8b88a;
+      padding: 3px 10px;
+      cursor: pointer;
+      font-family: Georgia, serif;
+      font-size: 11px;
+    }
+
+    .market-sell-btn:hover {
+      background: rgba(80,60,25,0.95);
+    }
+
+    #market-close {
+      display: block;
+      margin: 12px auto 0;
+      background: rgba(60,45,20,0.9);
+      border: 1px solid #5c4a2a;
+      color: #c8b88a;
+      padding: 6px 20px;
+      cursor: pointer;
+      font-family: Georgia, serif;
+      font-size: 12px;
+    }
+
+    /* ── Build Menu ────────────────────────────────────── */
+
+    #build-menu {
+      position: fixed;
+      bottom: 66px;
+      left: 260px;
+      background: rgba(25,18,8,0.97);
+      border: 1px solid #5c4a2a;
+      padding: 8px;
+      display: none;
+      z-index: 15;
+    }
+
+    .build-option {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      cursor: pointer;
+      font-size: 12px;
+      transition: background 0.15s;
+    }
+
+    .build-option:hover {
+      background: rgba(60,45,20,0.5);
+    }
+
+    .build-cost {
+      color: #8a7a5a;
+      font-size: 10px;
+    }
+
+    /* ── Tooltip ────────────────────────────────────────── */
+
+    #tooltip {
+      position: fixed;
+      background: rgba(20,15,8,0.95);
+      border: 1px solid #5c4a2a;
+      padding: 6px 10px;
+      font-size: 11px;
+      pointer-events: none;
+      display: none;
+      z-index: 50;
+      max-width: 200px;
+    }
+
+    /* ── Drag Selection Box ────────────────────────────── */
+
+    #select-box {
+      position: fixed;
+      border: 1px solid rgba(200, 184, 138, 0.6);
+      background: rgba(200, 184, 138, 0.1);
+      pointer-events: none;
+      display: none;
+      z-index: 5;
+    }
+
+    /* ── Loading Screen ────────────────────────────────── */
+
+    #loading {
+      position: fixed;
+      inset: 0;
+      background: #1a1410;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      transition: opacity 1s;
+    }
+
+    #loading h1 {
+      font-size: 28px;
+      color: #c8b88a;
+      letter-spacing: 4px;
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    #loading p {
+      color: #8a7a5a;
+      font-size: 14px;
+      margin-bottom: 24px;
+    }
+
+    #loading .bar-outer {
+      width: 300px;
+      height: 6px;
+      background: #2a2010;
+      border: 1px solid #5c4a2a;
+    }
+
+    #loading .bar-inner {
+      height: 100%;
+      background: #c8a832;
+      width: 0%;
+      transition: width 0.3s;
+    }
+
+    #loading.fade-out {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    /* ── Inventory Panel ───────────────────────────────── */
+
+    #inventory-bar {
+      position: fixed;
+      top: 36px;
+      left: 0;
+      right: 0;
+      height: 28px;
+      background: rgba(30,22,10,0.8);
+      border-bottom: 1px solid #3a2e1a;
+      display: flex;
+      align-items: center;
+      padding: 0 12px;
+      gap: 16px;
+      font-size: 11px;
+      z-index: 10;
+    }
+
+    .inv-item {
+      color: #8a7a5a;
+    }
+
+    .inv-item span {
+      color: #c8b88a;
+    }
+  </style>
+</head>
+<body>
+  <!-- Loading Screen -->
+  <div id="loading">
+    <h1>Crown of Ceylon</h1>
+    <p>Charting the shores of Lanka, 1702</p>
+    <div class="bar-outer"><div class="bar-inner" id="load-bar"></div></div>
+  </div>
+
+  <!-- Game Canvas -->
+  <canvas id="game-canvas"></canvas>
+  <canvas id="minimap-canvas" width="180" height="180"></canvas>
+
+  <!-- HUD -->
+  <div id="hud-top">
+    <div class="resource-item">
+      <canvas class="resource-icon" id="icon-gold" width="16" height="16"></canvas>
+      <span class="resource-value" id="res-gold">0</span>
+      <span class="resource-label">Gold</span>
+    </div>
+    <div class="resource-item">
+      <canvas class="resource-icon" id="icon-food" width="16" height="16"></canvas>
+      <span class="resource-value" id="res-food">0</span>
+      <span class="resource-label">Food</span>
+    </div>
+    <div class="resource-item">
+      <canvas class="resource-icon" id="icon-wood" width="16" height="16"></canvas>
+      <span class="resource-value" id="res-wood">0</span>
+      <span class="resource-label">Wood</span>
+    </div>
+    <div class="resource-item">
+      <canvas class="resource-icon" id="icon-stone" width="16" height="16"></canvas>
+      <span class="resource-value" id="res-stone">0</span>
+      <span class="resource-label">Stone</span>
+    </div>
+    <div style="flex:1"></div>
+    <div class="resource-item" style="cursor:pointer" onclick="game.toggleMarket()">
+      <span class="resource-label" style="color:#c8a832">Colombo Market</span>
+    </div>
+  </div>
+
+  <div id="inventory-bar"></div>
+
+  <!-- Selection Panel -->
+  <div id="selection-panel">
+    <h3 id="selection-title">Selected</h3>
+    <div id="selection-info"></div>
+  </div>
+
+  <!-- Action Bar -->
+  <div id="action-bar">
+    <div class="action-btn" onclick="game.actionMove()" title="Move (M)">
+      <span class="icon">&#9654;</span><span class="label">Move</span>
+    </div>
+    <div class="action-btn" onclick="game.actionExplore()" title="Explore (E)">
+      <span class="icon">&#9788;</span><span class="label">Scout</span>
+    </div>
+    <div class="action-btn" onclick="game.actionHarvest()" title="Harvest (H)">
+      <span class="icon">&#9752;</span><span class="label">Gather</span>
+    </div>
+    <div class="action-btn" onclick="game.toggleBuildMenu()" title="Build (B)">
+      <span class="icon">&#9962;</span><span class="label">Build</span>
+    </div>
+  </div>
+
+  <!-- Build Menu -->
+  <div id="build-menu">
+    <div class="build-option" onclick="game.startBuild('camp')">
+      <strong>Camp</strong> <span class="build-cost">30 Wood, 20 Gold</span>
+    </div>
+    <div class="build-option" onclick="game.startBuild('farm')">
+      <strong>Farm</strong> <span class="build-cost">40 Wood, 30 Gold</span>
+    </div>
+    <div class="build-option" onclick="game.startBuild('mine')">
+      <strong>Mine</strong> <span class="build-cost">50 Wood, 30 Stone, 50 Gold</span>
+    </div>
+    <div class="build-option" onclick="game.startBuild('warehouse')">
+      <strong>Warehouse</strong> <span class="build-cost">60 Wood, 40 Stone, 40 Gold</span>
+    </div>
+    <div class="build-option" onclick="game.startBuild('tradingPost')">
+      <strong>Trading Post</strong> <span class="build-cost">60 Wood, 30 Stone, 80 Gold</span>
+    </div>
+    <div class="build-option" onclick="game.startBuild('dock')">
+      <strong>Dock</strong> <span class="build-cost">80 Wood, 50 Stone, 100 Gold</span>
+    </div>
+    <div class="build-option" onclick="game.startBuild('road')">
+      <strong>Road</strong> <span class="build-cost">10 Stone</span>
+    </div>
+  </div>
+
+  <!-- Market Panel -->
+  <div id="market-panel">
+    <h2>Colombo Port Market</h2>
+    <div id="market-rows"></div>
+    <button id="market-close" onclick="game.toggleMarket()">Close</button>
+  </div>
+
+  <!-- Notifications -->
+  <div id="notifications"></div>
+
+  <!-- Tooltip -->
+  <div id="tooltip"></div>
+
+  <!-- Drag Select -->
+  <div id="select-box"></div>
+
+  <script src="js/sprites.js"></script>
+  <script src="js/map.js"></script>
+  <script src="js/renderer.js"></script>
+  <script src="js/input.js"></script>
+  <script src="js/network.js"></script>
+  <script src="js/game.js"></script>
+</body>
+</html>
