@@ -1,733 +1,770 @@
 // ═══════════════════════════════════════════════════════════════════════════
-// Crown of Ceylon — Main Game Controller
-// Ties together all systems: rendering, input, networking, UI.
+// Crown of Ceylon — Game Controller
+// Stardew Valley × Age of Empires hybrid: farming, crafting, trade routes,
+// day/night cycle, cozy exploration, multiplayer economy.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const game = (() => {
-  // ── State ─────────────────────────────────────────────────────────────
+  // ── Player State ────────────────────────────────────────────────────────
 
-  let playerId = null;
-  let players = new Map();
-  let units = new Map();
+  const player = {
+    x: 0, y: 0,
+    direction: 0,
+    moving: false,
+    speed: 0.06,
+    color: '#e8d0a0',
+    name: 'Explorer',
+
+    gold: 50,
+    energy: 100,
+    maxEnergy: 100,
+    reputation: 0,
+
+    inventory: [],
+    maxInventory: 24,
+    hotbarSlot: 0,
+
+    tools: ['hoe', 'wateringCan', 'pickaxe', 'axe', 'machete', 'seeds'],
+    currentTool: 'hoe',
+    toolLevel: { hoe: 1, wateringCan: 1, pickaxe: 1, axe: 1, machete: 1 },
+    selectedSeed: 'tea',
+  };
+
+  // ── World State ─────────────────────────────────────────────────────────
+
+  let dayCount = 1;
+  let timeOfDay = 0.3;
+  let timeSpeed = 0.00008;
+  let season = 'monsoon';
+
   let buildings = new Map();
-  let selectedUnits = new Set();
-  let explored = new Set();
-  let market = {};
-  let myResources = { gold: 0, food: 0, wood: 0, stone: 0 };
-  let myInventory = {};
-  let notifications = [];
-  let buildMode = null;
-  let buildGhost = null;
-  let actionMode = null; // 'move', 'explore', 'harvest'
-  let running = false;
+  let otherPlayers = [];
 
-  // ── Initialization ────────────────────────────────────────────────────
+  const RECIPES = {
+    driedTea: { input: { tea: 3 }, output: { driedTea: 1 }, station: 'dryingRack', time: 2 },
+    packagedTea: { input: { driedTea: 2 }, output: { packagedTea: 1 }, station: 'dryingRack', time: 1 },
+    spiceBundle: { input: { cinnamon: 2, spice: 1 }, output: { spiceBundle: 1 }, station: 'dryingRack', time: 2 },
+    milledRice: { input: { rice: 4 }, output: { milledRice: 2 }, station: null, time: 1 },
+    cutGem: { input: { sapphire: 1 }, output: { cutGem: 1 }, station: 'gemCutter', time: 3 },
+    cutRuby: { input: { ruby: 1 }, output: { cutGem: 1 }, station: 'gemCutter', time: 3 },
+    jewelry: { input: { cutGem: 1, gold: 5 }, output: { jewelry: 1 }, station: 'gemCutter', time: 4 },
+    food: { input: { rice: 2 }, output: { food: 1 }, station: null, time: 0 },
+  };
+
+  const BUILD_COSTS = {
+    house: { wood: 20, stone: 10 },
+    farm: { wood: 10 },
+    smelter: { stone: 15, wood: 5 },
+    gemCutter: { wood: 10, stone: 5 },
+    dryingRack: { wood: 15 },
+    carpentry: { wood: 20, stone: 5 },
+    warehouse: { wood: 25, stone: 15 },
+    tradingPost: { wood: 20, stone: 10, gold: 30 },
+    dock: { wood: 30, stone: 10 },
+    road: { stone: 3 },
+    well: { stone: 10, wood: 5 },
+    marketStall: { wood: 15, gold: 20 },
+  };
+
+  let marketPrices = {
+    tea: 8, driedTea: 18, packagedTea: 35,
+    rice: 4, milledRice: 12,
+    cinnamon: 12, spiceBundle: 30,
+    sapphire: 25, ruby: 30, moonstone: 20,
+    cutGem: 60, jewelry: 120,
+    wood: 3, stone: 4, food: 5,
+  };
+
+  let buildMode = null;
+  let buildGhostX = 0, buildGhostY = 0;
+  let showInventory = false;
+  let showCrafting = false;
+  let showBuildMenu = false;
+  let showMarket = false;
+  let chatActive = false;
+  let chatMessages = [];
+  let notifications = [];
+  let offlineMode = false;
+  let frameCount = 0;
+  let lastNetworkUpdate = 0;
+
+  // ── Initialization ──────────────────────────────────────────────────────
 
   async function init() {
-    updateLoadBar(10);
-
-    // Generate map
-    GameMap.generate(42); // Fixed seed for consistent world
-    updateLoadBar(40);
-
-    // Init renderer
+    GameMap.generate(42);
     Renderer.init();
-    updateLoadBar(50);
-
-    // Init input
     Input.init();
-    updateLoadBar(60);
 
-    // Draw HUD icons
-    Sprites.drawHudIcon('icon-gold', 'gold');
-    Sprites.drawHudIcon('icon-food', 'food');
-    Sprites.drawHudIcon('icon-wood', 'wood');
-    Sprites.drawHudIcon('icon-stone', 'stone');
-    updateLoadBar(70);
+    addToInventory('wood', 10);
+    addToInventory('food', 5);
 
-    // Connect to server
     try {
-      const initMsg = await Network.connect();
-      playerId = initMsg.playerId;
-
-      const player = initMsg.player;
-      players.set(playerId, player);
-      myResources = player.resources;
-      myInventory = player.inventory || {};
-      market = initMsg.market || {};
-
-      // Set explored tiles
-      if (initMsg.explored) {
-        explored = new Set(initMsg.explored);
-        Renderer.setExplored(explored);
-      }
-
-      // Add starting units
-      if (initMsg.units) {
-        for (const u of initMsg.units) {
-          units.set(u.id, u);
-        }
-      }
-
-      updateLoadBar(90);
+      const initData = await Network.connect();
+      player.x = initData.startX || GameMap.colomboX + 4;
+      player.y = initData.startY || GameMap.colomboY;
+      player.color = initData.color || player.color;
+      player.name = initData.name || player.name;
+      if (initData.inventory) player.inventory = initData.inventory;
+      if (initData.gold != null) player.gold = initData.gold;
+      setupNetworkHandlers();
+      addNotification('Connected! Welcome to Ceylon.');
     } catch (e) {
-      console.warn('Could not connect to server, running in single-player mode');
-      // Offline fallback
-      playerId = 1;
-      players.set(1, {
-        id: 1,
-        name: 'Explorer 1',
-        color: '#c23616',
-        resources: { gold: 500, food: 200, wood: 100, stone: 50 },
-        inventory: {},
-      });
-      myResources = players.get(1).resources;
-
-      // Create starting units manually
-      const startPos = { x: 20, y: 100 };
-      for (let i = 0; i < 3; i++) {
-        const unit = {
-          id: i + 1,
-          playerId: 1,
-          type: i === 0 ? 'explorer' : 'worker',
-          x: startPos.x + i * 2,
-          y: startPos.y,
-          hp: 100,
-          maxHp: 100,
-          task: null,
-          targetX: null,
-          targetY: null,
-          carryType: null,
-          carryAmount: 0,
-          speed: i === 0 ? 1.5 : 1.0,
-        };
-        units.set(unit.id, unit);
-      }
-
-      // Reveal starting area
-      for (let dy = -8; dy <= 8; dy++) {
-        for (let dx = -8; dx <= 8; dx++) {
-          if (dx * dx + dy * dy <= 64) {
-            explored.add(`${startPos.x + dx},${startPos.y + dy}`);
-          }
-        }
-      }
-      Renderer.setExplored(explored);
-
-      updateLoadBar(90);
+      console.log('Running in offline mode');
+      offlineMode = true;
+      player.x = GameMap.colomboX + 4;
+      player.y = GameMap.colomboY;
+      addNotification('Offline mode. Explore and build!');
     }
 
-    // Register network handlers
-    setupNetworkHandlers();
+    Renderer.followPlayer(player.x, player.y);
+    Renderer.setVisibleFromPlayer(player.x, player.y, 12);
 
-    updateLoadBar(100);
+    Sprites.drawHudIcon('icon-gold', 'gold');
+    Sprites.drawHudIcon('icon-energy', 'energy');
+    Sprites.drawHudIcon('icon-reputation', 'reputation');
 
-    // Center camera on first unit
-    const firstUnit = units.values().next().value;
-    if (firstUnit) {
-      Renderer.centerOnTile(firstUnit.x, firstUnit.y);
-    }
+    addNotification('Day ' + dayCount + ' - ' + getSeasonName());
+    addNotification('WASD to move. E to interact. 1-6 for tools.');
 
-    // Hide loading screen
-    setTimeout(() => {
-      document.getElementById('loading').classList.add('fade-out');
-      setTimeout(() => {
-        document.getElementById('loading').style.display = 'none';
-      }, 1000);
-    }, 500);
-
-    // Start game loop
-    running = true;
     requestAnimationFrame(gameLoop);
   }
-
-  function updateLoadBar(pct) {
-    const bar = document.getElementById('load-bar');
-    if (bar) bar.style.width = pct + '%';
-  }
-
-  // ── Network Handlers ──────────────────────────────────────────────────
 
   function setupNetworkHandlers() {
-    Network.on('world_state', (msg) => {
-      if (msg.units) {
-        for (const u of msg.units) {
-          if (!units.has(u.id)) {
-            units.set(u.id, u);
-          }
-        }
-      }
-      if (msg.buildings) {
-        for (const b of msg.buildings) {
-          buildings.set(b.id, b);
-        }
-      }
+    Network.on('state_update', (msg) => {
+      if (msg.players) otherPlayers = msg.players.filter(p => p.id !== Network.playerId);
+      if (msg.buildings) buildings = new Map(msg.buildings.map(b => [b.id, b]));
+      if (msg.marketPrices) marketPrices = msg.marketPrices;
     });
-
-    Network.on('unit_positions', (msg) => {
-      for (const update of msg.units) {
-        const unit = units.get(update.id);
-        if (unit) {
-          unit.x = update.x;
-          unit.y = update.y;
-          unit.task = update.task;
-          unit.carryType = update.carryType;
-          unit.carryAmount = update.carryAmount;
-        } else {
-          units.set(update.id, update);
-        }
-      }
-    });
-
-    Network.on('fog_reveal', (msg) => {
-      if (msg.explored) {
-        explored = new Set(msg.explored);
-        Renderer.setExplored(explored);
-      }
-    });
-
-    Network.on('resources_update', (msg) => {
-      if (msg.resources) myResources = msg.resources;
-      if (msg.inventory) myInventory = msg.inventory;
-    });
-
-    Network.on('building_placed', (msg) => {
-      buildings.set(msg.building.id, msg.building);
-    });
-
-    Network.on('building_complete', (msg) => {
-      const bld = buildings.get(msg.id);
-      if (bld) bld.built = 100;
-      addNotification(`Building complete: ${bld ? bld.type : 'unknown'}`);
-    });
-
-    Network.on('resource_depleted', (msg) => {
-      // Remove from local map data
-      const idx = GameMap.resourceNodes.findIndex(n => n.id === msg.id);
-      if (idx >= 0) GameMap.resourceNodes.splice(idx, 1);
-    });
-
-    Network.on('market_update', (msg) => {
-      market = msg.market;
-      updateMarketUI();
-    });
-
-    Network.on('discovery', (msg) => {
-      const disc = msg.discovery;
-      addNotification(`Discovery! ${disc.name}`, 'discovery');
-    });
-
-    Network.on('player_joined', (msg) => {
-      players.set(msg.playerId, { id: msg.playerId, name: msg.name, color: msg.color });
-      addNotification(`${msg.name} has arrived in Ceylon`);
-    });
-
+    Network.on('player_joined', (msg) => addNotification(msg.name + ' has arrived in Ceylon!'));
     Network.on('player_left', (msg) => {
-      addNotification(`A trader has departed`);
+      addNotification(msg.name + ' has departed.');
+      otherPlayers = otherPlayers.filter(p => p.id !== msg.playerId);
     });
-
     Network.on('chat', (msg) => {
-      const p = players.get(msg.playerId);
-      addNotification(`${p ? p.name : 'Unknown'}: ${msg.text}`);
+      chatMessages.push({ name: msg.name, text: msg.text, time: Date.now() });
+      if (chatMessages.length > 50) chatMessages.shift();
     });
-
-    Network.on('error', (msg) => {
-      addNotification(msg.text);
+    Network.on('market_update', (msg) => { if (msg.prices) marketPrices = msg.prices; });
+    Network.on('discovery', (msg) => {
+      addNotification('Discovery: ' + msg.description);
+      if (msg.reward) {
+        for (const [item, count] of Object.entries(msg.reward)) addToInventory(item, count);
+      }
+    });
+    Network.on('day_advance', (msg) => {
+      dayCount = msg.day || dayCount + 1;
+      timeOfDay = 0.25;
+      season = msg.season || season;
+      GameMap.advanceDay();
+      player.energy = player.maxEnergy;
+      addNotification('Day ' + dayCount + ' - ' + getSeasonName());
+    });
+    Network.on('farm_update', (msg) => {
+      if (msg.action === 'till') GameMap.tileFarm(msg.x, msg.y);
+      else if (msg.action === 'water') GameMap.waterFarm(msg.x, msg.y);
+      else if (msg.action === 'plant') GameMap.plantCrop(msg.x, msg.y, msg.cropType);
+    });
+    Network.on('build_confirm', (msg) => {
+      buildings.set(msg.building.id, msg.building);
+      addNotification('Built: ' + msg.building.type);
+    });
+    Network.on('resource_update', (msg) => {
+      if (msg.gold != null) player.gold = msg.gold;
+      if (msg.inventory) player.inventory = msg.inventory;
+      if (msg.energy != null) player.energy = msg.energy;
+    });
+    Network.on('trade_complete', (msg) => {
+      addNotification('Trade complete! Earned ' + msg.earned + ' gold.');
+      if (msg.gold != null) player.gold = msg.gold;
     });
   }
 
-  // ── Game Loop ─────────────────────────────────────────────────────────
+  // ── Game Loop ───────────────────────────────────────────────────────────
 
-  function gameLoop(timestamp) {
-    if (!running) return;
-
-    // Edge scrolling and keyboard scroll
-    Input.updateEdgeScroll();
-
-    // Update visible tiles based on unit positions
-    Renderer.setVisible(Array.from(units.values()), playerId);
-
-    // Offline unit simulation
-    if (!Network.connected) {
-      offlineSimulation();
-    }
-
-    // Render
-    Renderer.render({
-      units,
-      buildings,
-      players,
-      selectedUnits,
-      resourceNodes: GameMap.resourceNodes,
-      buildGhost,
-    });
-
-    // Update HUD
-    updateHUD();
-
+  function gameLoop() {
+    frameCount++;
+    update();
+    draw();
     requestAnimationFrame(gameLoop);
   }
 
-  // ── Offline Simulation ────────────────────────────────────────────────
+  function update() {
+    timeOfDay += timeSpeed;
+    if (timeOfDay >= 1) advanceDay();
 
-  function offlineSimulation() {
-    for (const unit of units.values()) {
-      if (unit.playerId !== playerId) continue;
-      if (unit.targetX == null || unit.targetY == null) continue;
-
-      const dx = unit.targetX - unit.x;
-      const dy = unit.targetY - unit.y;
-      const dist = Math.sqrt(dx * dx + dy * dy);
-
-      if (dist < 0.5) {
-        if (unit.task === 'exploring') {
-          // Reveal area
-          const radius = unit.type === 'explorer' ? 10 : 6;
-          for (let oy = -radius; oy <= radius; oy++) {
-            for (let ox = -radius; ox <= radius; ox++) {
-              if (ox * ox + oy * oy <= radius * radius) {
-                explored.add(`${Math.floor(unit.x + ox)},${Math.floor(unit.y + oy)}`);
-              }
-            }
-          }
-          Renderer.setExplored(explored);
-
-          // Discovery chance
-          if (Math.random() < 0.15) {
-            const discoveries = [
-              'Ancient Scroll', 'Stone Idol', 'Temple Inscription',
-              'Hidden Gem Cache', 'Abandoned Storehouse', 'Ancient City Ruins',
-            ];
-            const disc = discoveries[Math.floor(Math.random() * discoveries.length)];
-            addNotification(`Discovery! ${disc}`, 'discovery');
-            myResources.gold += Math.floor(Math.random() * 100);
-          }
-        }
-        unit.task = null;
-        unit.targetX = null;
-        unit.targetY = null;
-        continue;
+    const movement = Input.getMovement();
+    if (movement.moving && player.energy > 0) {
+      const newX = player.x + movement.dx * player.speed;
+      const newY = player.y + movement.dy * player.speed;
+      if (GameMap.isWalkable(Math.floor(newX), Math.floor(newY))) {
+        player.x = newX;
+        player.y = newY;
+        player.moving = true;
+        player.direction = movement.direction;
+        if (frameCount % 120 === 0) player.energy = Math.max(0, player.energy - 0.5);
       }
-
-      const speed = unit.speed * 0.15;
-      unit.x += (dx / dist) * speed;
-      unit.y += (dy / dist) * speed;
-
-      // Reveal fog while moving
-      const radius = unit.type === 'explorer' ? 8 : 4;
-      for (let oy = -radius; oy <= radius; oy++) {
-        for (let ox = -radius; ox <= radius; ox++) {
-          if (ox * ox + oy * oy <= radius * radius) {
-            explored.add(`${Math.floor(unit.x + ox)},${Math.floor(unit.y + oy)}`);
-          }
-        }
-      }
-      Renderer.setExplored(explored);
+    } else {
+      player.moving = false;
     }
+
+    Renderer.followPlayer(player.x, player.y);
+    Renderer.setVisibleFromPlayer(player.x, player.y, 12);
+
+    if (frameCount - lastNetworkUpdate > 6) {
+      lastNetworkUpdate = frameCount;
+      Network.sendPlayerPosition(player.x, player.y, player.direction, player.moving);
+    }
+
+    updateHUD();
   }
 
-  // ── Click Handlers ────────────────────────────────────────────────────
+  function draw() {
+    const dirs = [{ dx: 0, dy: 1 }, { dx: -1, dy: 0 }, { dx: 0, dy: -1 }, { dx: 1, dy: 0 }];
+    const d = dirs[player.direction];
+    const interactTile = { x: Math.floor(player.x + d.dx), y: Math.floor(player.y + d.dy) };
 
-  function onClick(wx, wy, shiftKey) {
-    const tx = Math.floor(wx);
-    const ty = Math.floor(wy);
+    Renderer.render({
+      player: { x: player.x, y: player.y, direction: player.direction, moving: player.moving, color: player.color, tool: player.currentTool },
+      otherPlayers,
+      buildings,
+      resourceNodes: GameMap.resourceNodes,
+      interactTile,
+      timeOfDay,
+      buildGhost: buildMode ? { type: buildMode, x: buildGhostX, y: buildGhostY } : null,
+    });
+  }
 
-    if (actionMode === 'harvest') {
-      // Try to find resource at click location
-      const node = GameMap.getResourceNodeAt(tx, ty, 2);
-      if (node) {
-        for (const uid of selectedUnits) {
-          Network.assignTask(uid, 'harvest', node.id);
+  // ── Day/Night System ────────────────────────────────────────────────────
+
+  function advanceDay() {
+    dayCount++;
+    timeOfDay = 0.25;
+    player.energy = player.maxEnergy;
+    GameMap.advanceDay();
+    const seasons = ['monsoon', 'dry', 'harvest', 'planting'];
+    season = seasons[Math.floor((dayCount - 1) / 7) % 4];
+    addNotification('Day ' + dayCount + ' - ' + getSeasonName());
+    Network.requestSleep();
+  }
+
+  function getSeasonName() {
+    return { monsoon: 'Monsoon Season', dry: 'Dry Season', harvest: 'Harvest Season', planting: 'Planting Season' }[season] || season;
+  }
+
+  function getTimeString() {
+    const totalMinutes = Math.floor(timeOfDay * 24 * 60);
+    const hour = Math.floor(totalMinutes / 60) % 24;
+    const minute = totalMinutes % 60;
+    const h12 = hour === 0 ? 12 : hour > 12 ? hour - 12 : hour;
+    const ampm = hour >= 12 ? 'PM' : 'AM';
+    return `${h12}:${minute.toString().padStart(2, '0')} ${ampm}`;
+  }
+
+  // ── Interaction System ──────────────────────────────────────────────────
+
+  function interact() {
+    if (player.energy <= 0) { addNotification('Too tired! Rest or eat food.'); return; }
+
+    const dirs = [{ dx: 0, dy: 1 }, { dx: -1, dy: 0 }, { dx: 0, dy: -1 }, { dx: 1, dy: 0 }];
+    const d = dirs[player.direction];
+    const tx = Math.floor(player.x + d.dx);
+    const ty = Math.floor(player.y + d.dy);
+    const tool = player.currentTool;
+    const farmPlot = GameMap.getFarmPlot(tx, ty);
+    const resourceNode = GameMap.getResourceNodeAt(tx, ty, 1.5);
+
+    if (tool === 'hoe') {
+      if (GameMap.isFarmable(tx, ty)) {
+        if (GameMap.tileFarm(tx, ty)) {
+          player.energy -= 2;
+          Network.sendFarmAction('till', tx, ty);
+          addNotification('Tilled soil');
         }
-        actionMode = null;
-        return;
+      } else if (farmPlot && !farmPlot.crop) {
+        addNotification('Already tilled!');
       }
-    }
-
-    // Try to select a unit at this position
-    let clickedUnit = null;
-    let closestDist = 2;
-
-    for (const unit of units.values()) {
-      const d = Math.sqrt((unit.x - wx) ** 2 + (unit.y - wy) ** 2);
-      if (d < closestDist && unit.playerId === playerId) {
-        closestDist = d;
-        clickedUnit = unit;
-      }
-    }
-
-    if (clickedUnit) {
-      if (shiftKey) {
-        // Toggle selection
-        if (selectedUnits.has(clickedUnit.id)) {
-          selectedUnits.delete(clickedUnit.id);
-        } else {
-          selectedUnits.add(clickedUnit.id);
+    } else if (tool === 'wateringCan') {
+      if (farmPlot) {
+        if (GameMap.waterFarm(tx, ty)) {
+          player.energy -= 1;
+          Network.sendFarmAction('water', tx, ty);
+          addNotification('Watered crops');
         }
-      } else {
-        selectedUnits.clear();
-        selectedUnits.add(clickedUnit.id);
       }
-      updateSelectionPanel();
-    } else if (!shiftKey) {
-      // Clicked empty space — deselect
-      selectedUnits.clear();
-      updateSelectionPanel();
+    } else if (tool === 'seeds') {
+      if (farmPlot && !farmPlot.crop) {
+        if (GameMap.plantCrop(tx, ty, player.selectedSeed)) {
+          player.energy -= 1;
+          Network.sendFarmAction('plant', tx, ty, player.selectedSeed);
+          addNotification('Planted ' + player.selectedSeed);
+        }
+      } else if (farmPlot && farmPlot.crop && farmPlot.stage >= 4) {
+        const crop = GameMap.harvestCrop(tx, ty);
+        if (crop) {
+          const amounts = { tea: 3, rice: 4, cinnamon: 2, spice: 2 };
+          addToInventory(crop, amounts[crop] || 2);
+          player.energy -= 1;
+          player.reputation += 1;
+          Network.sendFarmAction('harvest', tx, ty);
+          addNotification('Harvested ' + (amounts[crop] || 2) + ' ' + crop + '!');
+        }
+      }
+    } else if (tool === 'pickaxe') {
+      if (resourceNode && (resourceNode.type === 'gemDeposit' || resourceNode.type === 'stoneDeposit')) {
+        const amount = Math.min(3, resourceNode.amount);
+        resourceNode.amount -= amount;
+        addToInventory(resourceNode.resourceType, amount);
+        player.energy -= 3;
+        Network.sendGather(resourceNode.id);
+        addNotification('Mined ' + amount + ' ' + resourceNode.resourceType);
+        if (resourceNode.amount <= 0) {
+          const idx = GameMap.resourceNodes.indexOf(resourceNode);
+          if (idx >= 0) GameMap.resourceNodes.splice(idx, 1);
+        }
+      }
+    } else if (tool === 'axe') {
+      if (resourceNode && resourceNode.type === 'woodPile') {
+        const amount = Math.min(4, resourceNode.amount);
+        resourceNode.amount -= amount;
+        addToInventory('wood', amount);
+        player.energy -= 2;
+        Network.sendGather(resourceNode.id);
+        addNotification('Chopped ' + amount + ' wood');
+        if (resourceNode.amount <= 0) {
+          const idx = GameMap.resourceNodes.indexOf(resourceNode);
+          if (idx >= 0) GameMap.resourceNodes.splice(idx, 1);
+        }
+      }
+    } else if (tool === 'machete') {
+      if (resourceNode && (resourceNode.type === 'teaPlant' || resourceNode.type === 'cinnamonTree')) {
+        const amount = Math.min(2, resourceNode.amount);
+        resourceNode.amount -= amount;
+        addToInventory(resourceNode.resourceType, amount);
+        player.energy -= 2;
+        Network.sendGather(resourceNode.id);
+        addNotification('Gathered ' + amount + ' ' + resourceNode.resourceType);
+        if (resourceNode.amount <= 0) {
+          const idx = GameMap.resourceNodes.indexOf(resourceNode);
+          if (idx >= 0) GameMap.resourceNodes.splice(idx, 1);
+        }
+      }
+      if (resourceNode && resourceNode.type === 'ruin') {
+        resourceNode.amount -= 1;
+        player.reputation += 5;
+        player.energy -= 5;
+        addNotification('Explored ancient ruins! +5 reputation');
+        const discoveries = [
+          { item: 'gold', count: 10, msg: 'Found ancient gold coins!' },
+          { item: 'sapphire', count: 2, msg: 'Discovered hidden sapphires!' },
+          { item: 'moonstone', count: 1, msg: 'A mysterious moonstone...' },
+          { item: 'ruby', count: 1, msg: 'A brilliant ruby in the rubble!' },
+        ];
+        const disc = discoveries[Math.floor(Math.random() * discoveries.length)];
+        if (disc.item === 'gold') player.gold += disc.count;
+        else addToInventory(disc.item, disc.count);
+        addNotification(disc.msg);
+        if (resourceNode.amount <= 0) {
+          const idx = GameMap.resourceNodes.indexOf(resourceNode);
+          if (idx >= 0) GameMap.resourceNodes.splice(idx, 1);
+        }
+      }
     }
+
+    updateHUD();
+  }
+
+  // ── Click Handlers ──────────────────────────────────────────────────────
+
+  function onLeftClick(wx, wy, shift) {
+    const tx = Math.floor(wx), ty = Math.floor(wy);
+    if (buildMode) { placeBuild(tx, ty); return; }
+    for (const [id, bld] of buildings) {
+      if (Math.abs(bld.x - tx) <= 1 && Math.abs(bld.y - ty) <= 1) { interactWithBuilding(bld); return; }
+    }
+    if (Math.abs(tx - GameMap.colomboX) <= 3 && Math.abs(ty - GameMap.colomboY) <= 3) { toggleMarket(); }
   }
 
   function onRightClick(wx, wy) {
-    if (selectedUnits.size === 0) return;
-
-    const tx = Math.floor(wx);
-    const ty = Math.floor(wy);
-
-    // Check if clicking on a resource
-    const node = GameMap.getResourceNodeAt(tx, ty, 2);
-    if (node) {
-      for (const uid of selectedUnits) {
-        Network.assignTask(uid, 'harvest', node.id);
-
-        // Offline fallback
-        if (!Network.connected) {
-          const unit = units.get(uid);
-          if (unit) {
-            unit.task = 'harvesting';
-            unit.taskTarget = node.id;
-            unit.targetX = node.x;
-            unit.targetY = node.y;
-          }
-        }
-      }
+    const tx = Math.floor(wx), ty = Math.floor(wy);
+    const farmPlot = GameMap.getFarmPlot(tx, ty);
+    if (farmPlot) {
+      if (farmPlot.crop && farmPlot.stage >= 4) addNotification('Ready to harvest! Use seeds tool + E.');
+      else if (farmPlot.crop) addNotification(farmPlot.crop + ' - Stage ' + farmPlot.stage + '/4' + (farmPlot.watered ? ' (watered)' : ' (needs water)'));
+      else addNotification('Empty farm plot. Select seeds tool + E to plant.');
       return;
     }
-
-    // Check if clicking on a building under construction
-    for (const bld of buildings.values()) {
-      if (Math.abs(bld.x - tx) <= 2 && Math.abs(bld.y - ty) <= 2 && bld.built < 100) {
-        for (const uid of selectedUnits) {
-          Network.assignTask(uid, 'build', bld.id);
-        }
-        return;
-      }
-    }
-
-    // Default: move
-    if (!GameMap.isWalkable(tx, ty)) return;
-
-    const unitIds = Array.from(selectedUnits);
-    Network.moveUnits(unitIds, wx, wy);
-
-    // Offline: directly update units
-    if (!Network.connected) {
-      const spacing = 1.5;
-      const cols = Math.ceil(Math.sqrt(unitIds.length));
-      unitIds.forEach((uid, i) => {
-        const unit = units.get(uid);
-        if (unit) {
-          const row = Math.floor(i / cols);
-          const col = i % cols;
-          unit.targetX = wx + (col - cols / 2) * spacing;
-          unit.targetY = wy + (row - cols / 2) * spacing;
-          unit.task = 'moving';
-        }
-      });
+    const node = GameMap.getResourceNodeAt(tx, ty, 2);
+    if (node) {
+      const toolNeeded = { gemDeposit: 'pickaxe', stoneDeposit: 'pickaxe', woodPile: 'axe', teaPlant: 'machete', cinnamonTree: 'machete', ruin: 'machete' };
+      addNotification(node.type + ' - Use ' + (toolNeeded[node.type] || 'tool') + ' near it + E. ' + node.amount + ' left.');
     }
   }
 
-  function boxSelect(x1, y1, x2, y2) {
-    selectedUnits.clear();
-
-    for (const unit of units.values()) {
-      if (unit.playerId !== playerId) continue;
-      const screen = Renderer.worldToScreen(unit.x, unit.y);
-      if (screen.x >= x1 && screen.x <= x2 && screen.y >= y1 && screen.y <= y2) {
-        selectedUnits.add(unit.id);
-      }
+  function interactWithBuilding(bld) {
+    if (bld.type === 'dryingRack' || bld.type === 'gemCutter' || bld.type === 'smelter') {
+      showCrafting = true;
+      const panel = document.getElementById('crafting-panel');
+      if (panel) panel.style.display = 'block';
+      updateCraftingUI(bld.type);
+    } else if (bld.type === 'tradingPost' || bld.type === 'marketStall') {
+      toggleMarket();
+    } else if (bld.type === 'warehouse') {
+      toggleInventory();
     }
-
-    updateSelectionPanel();
   }
 
-  // ── Actions ───────────────────────────────────────────────────────────
+  // ── Inventory ───────────────────────────────────────────────────────────
 
-  function actionMove() {
-    actionMode = 'move';
+  function addToInventory(item, count) {
+    const existing = player.inventory.find(s => s.item === item);
+    if (existing) { existing.count += count; }
+    else if (player.inventory.length < player.maxInventory) { player.inventory.push({ item, count }); }
+    else { addNotification('Inventory full!'); return false; }
+    updateInventoryUI();
+    return true;
+  }
+
+  function removeFromInventory(item, count) {
+    const existing = player.inventory.find(s => s.item === item);
+    if (!existing || existing.count < count) return false;
+    existing.count -= count;
+    if (existing.count <= 0) player.inventory = player.inventory.filter(s => s.count > 0);
+    updateInventoryUI();
+    return true;
+  }
+
+  function getInventoryCount(item) {
+    const slot = player.inventory.find(s => s.item === item);
+    return slot ? slot.count : 0;
+  }
+
+  function hasResources(costs) {
+    for (const [item, count] of Object.entries(costs)) {
+      if (item === 'gold' ? player.gold < count : getInventoryCount(item) < count) return false;
+    }
+    return true;
+  }
+
+  function spendResources(costs) {
+    for (const [item, count] of Object.entries(costs)) {
+      if (item === 'gold') player.gold -= count;
+      else removeFromInventory(item, count);
+    }
+  }
+
+  // ── Crafting ────────────────────────────────────────────────────────────
+
+  function craft(recipeName) {
+    const recipe = RECIPES[recipeName];
+    if (!recipe) return;
+    for (const [item, count] of Object.entries(recipe.input)) {
+      if (item === 'gold' ? player.gold < count : getInventoryCount(item) < count) {
+        addNotification('Not enough ' + item + '!'); return;
+      }
+    }
+    for (const [item, count] of Object.entries(recipe.input)) {
+      if (item === 'gold') player.gold -= count; else removeFromInventory(item, count);
+    }
+    for (const [item, count] of Object.entries(recipe.output)) addToInventory(item, count);
+    player.energy -= 2;
+    Network.sendCraft(recipeName);
+    addNotification('Crafted: ' + recipeName);
+    updateHUD();
+  }
+
+  // ── Building ────────────────────────────────────────────────────────────
+
+  function startBuild(type) {
+    if (!BUILD_COSTS[type]) return;
+    if (!hasResources(BUILD_COSTS[type])) { addNotification('Not enough resources!'); return; }
+    buildMode = type;
+    addNotification('Click to place ' + type + '. ESC to cancel.');
+  }
+
+  function placeBuild(tx, ty) {
+    if (!buildMode) return;
+    if (!GameMap.isWalkable(tx, ty)) { addNotification('Cannot build here!'); return; }
+    const cost = BUILD_COSTS[buildMode];
+    if (!hasResources(cost)) { addNotification('Not enough resources!'); return; }
+    spendResources(cost);
+    const id = Date.now() + Math.random();
+    const bld = { id, type: buildMode, x: tx, y: ty, owner: Network.playerId || 'local', built: 100, color: player.color };
+    buildings.set(id, bld);
+    Network.sendBuild(buildMode, tx, ty);
+    addNotification('Built ' + buildMode + '!');
     buildMode = null;
-    buildGhost = null;
+    player.energy -= 5;
+    updateHUD();
   }
 
-  function actionExplore() {
-    if (selectedUnits.size === 0) return;
+  function updateBuildGhost(tx, ty) { buildGhostX = tx; buildGhostY = ty; }
 
-    // Send units to explore a random unexplored area
-    for (const uid of selectedUnits) {
-      const unit = units.get(uid);
-      if (!unit) continue;
+  // ── Market ──────────────────────────────────────────────────────────────
 
-      // Find nearest unexplored tile
-      let targetX = unit.x + (Math.random() - 0.5) * 30;
-      let targetY = unit.y + (Math.random() - 0.5) * 30;
-      targetX = Math.max(2, Math.min(GameMap.MAP_W - 2, targetX));
-      targetY = Math.max(2, Math.min(GameMap.MAP_H - 2, targetY));
+  function sellItem(resource, amount) {
+    amount = amount || 1;
+    if (getInventoryCount(resource) < amount) { addNotification('Not enough ' + resource + '!'); return; }
+    const price = marketPrices[resource] || 1;
+    const total = price * amount;
+    removeFromInventory(resource, amount);
+    player.gold += total;
+    Network.sellToMarket(resource, amount);
+    addNotification('Sold ' + amount + ' ' + resource + ' for ' + total + 'g');
+    updateHUD();
+    updateMarketUI();
+  }
 
-      Network.assignTask(uid, 'explore', null, targetX, targetY);
+  // ── Tools ───────────────────────────────────────────────────────────────
 
-      if (!Network.connected) {
-        unit.task = 'exploring';
-        unit.targetX = targetX;
-        unit.targetY = targetY;
-      }
+  function selectHotbarSlot(slot) {
+    if (slot >= 0 && slot < player.tools.length) {
+      player.hotbarSlot = slot;
+      player.currentTool = player.tools[slot];
+      updateHotbarUI();
     }
   }
 
-  function actionHarvest() {
-    actionMode = 'harvest';
-    addNotification('Click a resource to harvest');
+  function cycleTool(dir) {
+    let idx = player.tools.indexOf(player.currentTool);
+    idx = (idx + dir + player.tools.length) % player.tools.length;
+    player.currentTool = player.tools[idx];
+    player.hotbarSlot = idx;
+    updateHotbarUI();
+  }
+
+  function selectSeed(seedType) {
+    if (['tea', 'rice', 'cinnamon', 'spice'].includes(seedType)) {
+      player.selectedSeed = seedType;
+      addNotification('Selected ' + seedType + ' seeds');
+    }
+  }
+
+  // ── UI Toggles ──────────────────────────────────────────────────────────
+
+  function toggleInventory() {
+    showInventory = !showInventory;
+    document.getElementById('inventory-panel').style.display = showInventory ? 'block' : 'none';
+    if (showInventory) updateInventoryUI();
+  }
+
+  function toggleCraftingMenu() {
+    showCrafting = !showCrafting;
+    document.getElementById('crafting-panel').style.display = showCrafting ? 'block' : 'none';
+    if (showCrafting) updateCraftingUI();
   }
 
   function toggleBuildMenu() {
-    const menu = document.getElementById('build-menu');
-    menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
-    if (menu.style.display !== 'block') {
-      buildMode = null;
-      buildGhost = null;
-    }
+    showBuildMenu = !showBuildMenu;
+    document.getElementById('build-panel').style.display = showBuildMenu ? 'block' : 'none';
+    if (showBuildMenu) updateBuildUI();
   }
 
-  function startBuild(type) {
-    buildMode = type;
-    document.getElementById('build-menu').style.display = 'none';
-    addNotification(`Click to place ${type}`);
+  function toggleMarket() {
+    showMarket = !showMarket;
+    document.getElementById('market-panel').style.display = showMarket ? 'block' : 'none';
+    if (showMarket) updateMarketUI();
   }
 
-  function updateBuildGhost(x, y) {
-    if (!buildMode) {
-      buildGhost = null;
-      return;
+  function toggleMapOverlay() {}
+
+  function toggleChat() {
+    const chatInput = document.getElementById('chat-input');
+    if (!chatActive) { chatActive = true; chatInput.style.display = 'block'; chatInput.focus(); }
+    else {
+      const text = chatInput.value.trim();
+      if (text) { Network.chat(text); chatMessages.push({ name: player.name, text, time: Date.now() }); }
+      chatInput.value = ''; chatInput.style.display = 'none'; chatActive = false;
     }
-    buildGhost = { type: buildMode, x, y };
-  }
-
-  function placeBuild(x, y) {
-    if (!buildMode) return;
-    if (!GameMap.isWalkable(x, y)) {
-      addNotification('Cannot build here');
-      return;
-    }
-
-    Network.requestBuild(buildMode, x, y);
-
-    // Offline fallback
-    if (!Network.connected) {
-      const costs = {
-        camp: { wood: 30, gold: 20 },
-        farm: { wood: 40, gold: 30 },
-        mine: { wood: 50, stone: 30, gold: 50 },
-        warehouse: { wood: 60, stone: 40, gold: 40 },
-        road: { stone: 10 },
-        dock: { wood: 80, stone: 50, gold: 100 },
-        tradingPost: { wood: 60, stone: 30, gold: 80 },
-      };
-      const cost = costs[buildMode];
-      if (cost) {
-        let canAfford = true;
-        for (const [res, amt] of Object.entries(cost)) {
-          if ((myResources[res] || 0) < amt) canAfford = false;
-        }
-        if (canAfford) {
-          for (const [res, amt] of Object.entries(cost)) {
-            myResources[res] -= amt;
-          }
-          const bld = {
-            id: Date.now(),
-            playerId,
-            type: buildMode,
-            x, y,
-            hp: 200,
-            maxHp: 200,
-            built: 0,
-          };
-          buildings.set(bld.id, bld);
-
-          // Auto-complete for offline testing
-          setTimeout(() => {
-            bld.built = 100;
-            addNotification(`${buildMode} completed!`);
-          }, 5000);
-        } else {
-          addNotification('Not enough resources');
-        }
-      }
-    }
-
-    buildMode = null;
-    buildGhost = null;
   }
 
   function cancelAction() {
-    buildMode = null;
-    buildGhost = null;
-    actionMode = null;
-    document.getElementById('build-menu').style.display = 'none';
-    document.getElementById('market-panel').style.display = 'none';
+    if (buildMode) { buildMode = null; addNotification('Build cancelled.'); }
+    if (showInventory) toggleInventory();
+    if (showCrafting) toggleCraftingMenu();
+    if (showBuildMenu) toggleBuildMenu();
+    if (showMarket) toggleMarket();
+    if (chatActive) { document.getElementById('chat-input').style.display = 'none'; chatActive = false; }
   }
 
-  // ── Market ────────────────────────────────────────────────────────────
+  // ── UI Updates ──────────────────────────────────────────────────────────
 
-  function toggleMarket() {
-    const panel = document.getElementById('market-panel');
-    panel.style.display = panel.style.display === 'block' ? 'none' : 'block';
-    if (panel.style.display === 'block') {
-      updateMarketUI();
+  function updateHUD() {
+    const el = (id) => document.getElementById(id);
+    const goldEl = el('gold-count'), energyEl = el('energy-count'), repEl = el('rep-count');
+    const timeEl = el('time-display'), dayEl = el('day-display'), energyBar = el('energy-bar-fill');
+    const seasonEl = el('season-display');
+    if (goldEl) goldEl.textContent = player.gold;
+    if (energyEl) energyEl.textContent = Math.floor(player.energy) + '/' + player.maxEnergy;
+    if (repEl) repEl.textContent = player.reputation;
+    if (timeEl) timeEl.textContent = getTimeString();
+    if (dayEl) dayEl.textContent = 'Day ' + dayCount;
+    if (energyBar) energyBar.style.width = (player.energy / player.maxEnergy * 100) + '%';
+    if (seasonEl) seasonEl.textContent = getSeasonName();
+    updateNotifications();
+  }
+
+  function updateHotbarUI() {
+    const hotbar = document.getElementById('hotbar');
+    if (!hotbar) return;
+    hotbar.innerHTML = '';
+    player.tools.forEach((tool, i) => {
+      const slot = document.createElement('div');
+      slot.className = 'hotbar-slot' + (i === player.hotbarSlot ? ' active' : '');
+      slot.onclick = () => selectHotbarSlot(i);
+      const icon = Sprites.getToolIcon(tool);
+      const canvas = document.createElement('canvas');
+      canvas.width = 20; canvas.height = 20;
+      canvas.getContext('2d').drawImage(icon, 0, 0);
+      slot.appendChild(canvas);
+      const label = document.createElement('span');
+      label.className = 'hotbar-label'; label.textContent = (i + 1);
+      slot.appendChild(label);
+      const name = document.createElement('span');
+      name.className = 'hotbar-name'; name.textContent = tool;
+      slot.appendChild(name);
+      hotbar.appendChild(slot);
+    });
+    const seedSel = document.getElementById('seed-selector');
+    if (seedSel) seedSel.style.display = player.currentTool === 'seeds' ? 'flex' : 'none';
+  }
+
+  function updateInventoryUI() {
+    const container = document.getElementById('inventory-items');
+    if (!container) return;
+    container.innerHTML = '';
+    player.inventory.forEach(slot => {
+      const item = document.createElement('div');
+      item.className = 'inventory-item';
+      const icon = Sprites.getResource(slot.item);
+      const canvas = document.createElement('canvas');
+      canvas.width = 20; canvas.height = 20;
+      canvas.getContext('2d').drawImage(icon, 0, 0);
+      item.appendChild(canvas);
+      const info = document.createElement('span');
+      info.textContent = slot.item + ' x' + slot.count;
+      item.appendChild(info);
+      container.appendChild(item);
+    });
+    if (player.inventory.length === 0) container.innerHTML = '<div style="color:#8a7a60;padding:8px">Empty</div>';
+  }
+
+  function updateCraftingUI(stationType) {
+    const container = document.getElementById('crafting-recipes');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const [name, recipe] of Object.entries(RECIPES)) {
+      if (stationType && recipe.station && recipe.station !== stationType) continue;
+      const div = document.createElement('div');
+      div.className = 'recipe-item';
+      const canCraft = Object.entries(recipe.input).every(([item, count]) => item === 'gold' ? player.gold >= count : getInventoryCount(item) >= count);
+      div.classList.toggle('craftable', canCraft);
+      const inputStr = Object.entries(recipe.input).map(([k, v]) => `${v} ${k}`).join(' + ');
+      const outputStr = Object.entries(recipe.output).map(([k, v]) => `${v} ${k}`).join(', ');
+      div.innerHTML = `<strong>${name}</strong><br><span class="recipe-input">${inputStr}</span> &rarr; <span class="recipe-output">${outputStr}</span>`;
+      if (canCraft) {
+        const btn = document.createElement('button');
+        btn.textContent = 'Craft'; btn.className = 'craft-btn';
+        btn.onclick = () => { craft(name); updateCraftingUI(stationType); };
+        div.appendChild(btn);
+      }
+      container.appendChild(div);
+    }
+  }
+
+  function updateBuildUI() {
+    const container = document.getElementById('build-options');
+    if (!container) return;
+    container.innerHTML = '';
+    for (const [type, cost] of Object.entries(BUILD_COSTS)) {
+      const div = document.createElement('div');
+      div.className = 'build-option';
+      const canBuild = hasResources(cost);
+      div.classList.toggle('buildable', canBuild);
+      const costStr = Object.entries(cost).map(([k, v]) => `${v} ${k}`).join(', ');
+      div.innerHTML = `<strong>${type}</strong><br><span class="build-cost">${costStr}</span>`;
+      if (canBuild) { div.onclick = () => { startBuild(type); toggleBuildMenu(); }; div.style.cursor = 'pointer'; }
+      container.appendChild(div);
     }
   }
 
   function updateMarketUI() {
-    const container = document.getElementById('market-rows');
+    const container = document.getElementById('market-items');
+    if (!container) return;
     container.innerHTML = '';
-
-    const resources = ['tea', 'spice', 'rice', 'cinnamon', 'sapphire', 'ruby', 'moonstone'];
-
-    for (const res of resources) {
-      const data = market[res] || { price: 0, supply: 0 };
-      const stock = myInventory[res] || 0;
-
-      const row = document.createElement('div');
-      row.className = 'market-row';
-      row.innerHTML = `
-        <span class="market-resource">${res}</span>
-        <span class="market-stock">x${stock}</span>
-        <span class="market-price">${data.price}g</span>
-        <button class="market-sell-btn" onclick="game.sellResource('${res}')" ${stock <= 0 ? 'disabled' : ''}>Sell 1</button>
-      `;
-      container.appendChild(row);
-    }
-  }
-
-  function sellResource(resource) {
-    const stock = myInventory[resource] || 0;
-    if (stock <= 0) return;
-
-    Network.sellToMarket(resource, 1);
-
-    // Offline fallback
-    if (!Network.connected) {
-      const data = market[resource];
-      if (data) {
-        const revenue = data.price;
-        myInventory[resource] = (myInventory[resource] || 0) - 1;
-        myResources.gold += revenue;
-        data.price = Math.max(10, Math.floor(data.price * 0.99));
-        addNotification(`Sold ${resource} for ${revenue} gold`);
-        updateMarketUI();
+    const sellable = player.inventory.filter(s => marketPrices[s.item]);
+    for (const slot of sellable) {
+      const price = marketPrices[slot.item] || 1;
+      const div = document.createElement('div');
+      div.className = 'market-item';
+      const icon = Sprites.getResource(slot.item);
+      const canvas = document.createElement('canvas');
+      canvas.width = 20; canvas.height = 20;
+      canvas.getContext('2d').drawImage(icon, 0, 0);
+      div.appendChild(canvas);
+      const info = document.createElement('span');
+      info.innerHTML = `${slot.item} x${slot.count} — <span class="market-price">${price}g each</span>`;
+      div.appendChild(info);
+      const btn = document.createElement('button');
+      btn.textContent = 'Sell 1'; btn.className = 'sell-btn';
+      btn.onclick = () => sellItem(slot.item, 1);
+      div.appendChild(btn);
+      if (slot.count >= 5) {
+        const btn5 = document.createElement('button');
+        btn5.textContent = 'Sell 5'; btn5.className = 'sell-btn';
+        btn5.onclick = () => sellItem(slot.item, 5);
+        div.appendChild(btn5);
       }
+      container.appendChild(div);
     }
+    if (sellable.length === 0) container.innerHTML = '<div style="color:#8a7a60;padding:8px">No tradeable goods</div>';
   }
 
-  // ── UI Updates ────────────────────────────────────────────────────────
+  // ── Notifications ───────────────────────────────────────────────────────
 
-  function updateHUD() {
-    document.getElementById('res-gold').textContent = myResources.gold || 0;
-    document.getElementById('res-food').textContent = myResources.food || 0;
-    document.getElementById('res-wood').textContent = myResources.wood || 0;
-    document.getElementById('res-stone').textContent = myResources.stone || 0;
-
-    // Inventory bar
-    const invBar = document.getElementById('inventory-bar');
-    const items = Object.entries(myInventory).filter(([, v]) => v > 0);
-    if (items.length > 0) {
-      invBar.innerHTML = items.map(([key, val]) =>
-        `<span class="inv-item">${key}: <span>${val}</span></span>`
-      ).join('');
-    } else {
-      invBar.innerHTML = '<span class="inv-item" style="color:#5a4a2a">No trade goods in inventory</span>';
-    }
+  function addNotification(text) {
+    notifications.push({ text, time: Date.now() });
+    if (notifications.length > 8) notifications.shift();
+    updateNotifications();
   }
 
-  function updateSelectionPanel() {
-    const panel = document.getElementById('selection-panel');
-    const title = document.getElementById('selection-title');
-    const info = document.getElementById('selection-info');
-
-    if (selectedUnits.size === 0) {
-      panel.style.display = 'none';
-      return;
-    }
-
-    panel.style.display = 'block';
-
-    if (selectedUnits.size === 1) {
-      const uid = selectedUnits.values().next().value;
-      const unit = units.get(uid);
-      if (!unit) return;
-
-      const typeNames = { explorer: 'Explorer', worker: 'Worker', cart: 'Cart' };
-      title.textContent = typeNames[unit.type] || unit.type;
-      info.innerHTML = `
-        <div>HP: ${unit.hp}/${unit.maxHp}</div>
-        <div>Position: ${Math.floor(unit.x)}, ${Math.floor(unit.y)}</div>
-        <div>Task: ${unit.task || 'Idle'}</div>
-        ${unit.carryAmount > 0 ? `<div>Carrying: ${unit.carryType} x${unit.carryAmount}</div>` : ''}
-      `;
-    } else {
-      title.textContent = `${selectedUnits.size} Units Selected`;
-      const typeCounts = {};
-      for (const uid of selectedUnits) {
-        const unit = units.get(uid);
-        if (unit) {
-          typeCounts[unit.type] = (typeCounts[unit.type] || 0) + 1;
-        }
-      }
-      info.innerHTML = Object.entries(typeCounts)
-        .map(([type, count]) => `<div>${type}: ${count}</div>`)
-        .join('');
-    }
-  }
-
-  // ── Notifications ─────────────────────────────────────────────────────
-
-  function addNotification(text, cssClass) {
+  function updateNotifications() {
     const container = document.getElementById('notifications');
-    const el = document.createElement('div');
-    el.className = 'notification' + (cssClass ? ` ${cssClass}` : '');
-    el.textContent = text;
-    container.appendChild(el);
-
-    setTimeout(() => {
-      el.style.opacity = '0';
-      setTimeout(() => el.remove(), 500);
-    }, 4000);
+    if (!container) return;
+    container.innerHTML = '';
+    const now = Date.now();
+    notifications = notifications.filter(n => now - n.time < 6000);
+    for (const n of notifications) {
+      const div = document.createElement('div');
+      div.className = 'notification';
+      div.style.opacity = Math.max(0, 1 - ((now - n.time) / 6000) * 0.8);
+      div.textContent = n.text;
+      container.appendChild(div);
+    }
+    const chatContainer = document.getElementById('chat-messages');
+    if (chatContainer) {
+      chatContainer.innerHTML = '';
+      for (const msg of chatMessages.slice(-5)) {
+        const div = document.createElement('div');
+        div.className = 'chat-msg';
+        div.innerHTML = `<strong>${msg.name}:</strong> ${msg.text}`;
+        chatContainer.appendChild(div);
+      }
+    }
   }
 
-  // ── Public API ────────────────────────────────────────────────────────
+  setTimeout(() => { updateHotbarUI(); updateHUD(); }, 100);
 
   return {
-    init,
-    onClick,
-    onRightClick,
-    boxSelect,
-    actionMove,
-    actionExplore,
-    actionHarvest,
-    toggleBuildMenu,
-    startBuild,
-    updateBuildGhost,
-    placeBuild,
-    cancelAction,
-    toggleMarket,
-    sellResource,
-    addNotification,
-
+    init, interact, onLeftClick, onRightClick,
+    selectHotbarSlot, cycleTool, selectSeed,
+    toggleInventory, toggleCraftingMenu, toggleBuildMenu, toggleMarket, toggleMapOverlay, toggleChat,
+    cancelAction, placeBuild, updateBuildGhost, sellItem, craft, addNotification,
     get buildMode() { return buildMode; },
-    get buildGhost() { return buildGhost; },
-    get playerId() { return playerId; },
-    get selectedUnits() { return selectedUnits; },
+    get player() { return player; },
+    get dayCount() { return dayCount; },
+    get timeOfDay() { return timeOfDay; },
+    get season() { return season; },
   };
 })();
 
-// ── Boot ──────────────────────────────────────────────────────────────────
-
-window.addEventListener('DOMContentLoaded', () => {
-  game.init();
-});
+window.addEventListener('DOMContentLoaded', () => game.init());
