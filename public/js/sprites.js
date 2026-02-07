@@ -24,13 +24,16 @@ const Sprites = (() => {
     rows: 8,       // total rows in sheet
     frameW: 0,     // auto-calculated on load
     frameH: 0,
-    // Map game directions (0=S, 1=W, 2=N, 3=E) to sprite sheet rows.
-    // Adjust these if the sprite sheet layout differs.
+    // Map game directions to sprite sheet rows (isometric mapping):
+    //   Game direction 0 = South (SE on screen) → front-right walk
+    //   Game direction 1 = West  (SW on screen) → front-left walk
+    //   Game direction 2 = North (NW on screen) → back-left walk
+    //   Game direction 3 = East  (NE on screen) → back-right walk
     directionRows: {
-      0: 0,   // South (front facing) → row 0
-      1: 1,   // West (front-left)    → row 1
-      2: 2,   // North (back facing)  → row 2
-      3: 4,   // East (front-right)   → row 4
+      0: 4,   // South → row 4 (front-right facing, SE walk)
+      1: 0,   // West  → row 0 (front-left facing, SW walk)
+      2: 1,   // North → row 1 (back-left facing, NW walk)
+      3: 3,   // East  → row 3 (back-right facing, NE walk)
     },
     idleFrame: 0,       // column index for idle pose
     walkStart: 1,       // first walk frame column
