@@ -1,6 +1,6 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // Crown of Ceylon — Network Layer (WebSocket Client)
-// Handles connection, message sending/receiving, and state synchronization.
+// Handles multiplayer sync: player positions, farming, trading, chat.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const Network = (() => {
@@ -15,7 +15,6 @@ const Network = (() => {
     return new Promise((resolve, reject) => {
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
       const url = `${protocol}//${window.location.host}`;
-
       ws = new WebSocket(url);
 
       ws.onopen = () => {
@@ -31,7 +30,6 @@ const Network = (() => {
             playerId = msg.playerId;
             resolve(msg);
           }
-          // Dispatch to handlers
           const handlers = messageHandlers[msg.type];
           if (handlers) {
             for (const handler of handlers) {
@@ -46,7 +44,6 @@ const Network = (() => {
       ws.onclose = () => {
         connected = false;
         console.log('Disconnected from server');
-        // Auto-reconnect
         if (reconnectAttempts < MAX_RECONNECT) {
           reconnectAttempts++;
           const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
@@ -69,9 +66,7 @@ const Network = (() => {
   }
 
   function on(type, handler) {
-    if (!messageHandlers[type]) {
-      messageHandlers[type] = [];
-    }
+    if (!messageHandlers[type]) messageHandlers[type] = [];
     messageHandlers[type].push(handler);
   }
 
@@ -81,56 +76,46 @@ const Network = (() => {
     }
   }
 
-  // ── Convenience methods ───────────────────────────────────────────────
+  // ── Game actions ────────────────────────────────────────────────────────
 
-  function moveUnits(unitIds, targetX, targetY) {
-    send({
-      type: 'move_units',
-      unitIds,
-      targetX,
-      targetY,
-    });
+  function sendPlayerPosition(x, y, direction, moving) {
+    send({ type: 'player_move', x, y, direction, moving });
   }
 
-  function assignTask(unitId, task, targetId, targetX, targetY) {
-    send({
-      type: 'assign_task',
-      unitId,
-      task,
-      targetId,
-      targetX,
-      targetY,
-    });
+  function sendFarmAction(action, tx, ty, cropType) {
+    send({ type: 'farm_action', action, x: tx, y: ty, cropType });
   }
 
-  function requestBuild(buildingType, x, y) {
-    send({
-      type: 'build',
-      buildingType,
-      x,
-      y,
-    });
+  function sendGather(nodeId) {
+    send({ type: 'gather', nodeId });
+  }
+
+  function sendCraft(recipe) {
+    send({ type: 'craft', recipe });
+  }
+
+  function sendBuild(buildingType, x, y) {
+    send({ type: 'build', buildingType, x, y });
   }
 
   function sellToMarket(resource, amount) {
-    send({
-      type: 'sell_to_market',
-      resource,
-      amount,
-    });
+    send({ type: 'sell_to_market', resource, amount });
   }
 
   function tradeWith(targetPlayerId, offer, request) {
-    send({
-      type: 'trade',
-      targetPlayerId,
-      offer,
-      request,
-    });
+    send({ type: 'trade', targetPlayerId, offer, request });
+  }
+
+  function sendCreateTradeRoute(path, goods) {
+    send({ type: 'create_trade_route', path, goods });
   }
 
   function chat(text) {
     send({ type: 'chat', text });
+  }
+
+  function requestSleep() {
+    send({ type: 'sleep' });
   }
 
   return {
@@ -138,12 +123,16 @@ const Network = (() => {
     send,
     on,
     off,
-    moveUnits,
-    assignTask,
-    requestBuild,
+    sendPlayerPosition,
+    sendFarmAction,
+    sendGather,
+    sendCraft,
+    sendBuild,
     sellToMarket,
     tradeWith,
+    sendCreateTradeRoute,
     chat,
+    requestSleep,
     get playerId() { return playerId; },
     get connected() { return connected; },
   };

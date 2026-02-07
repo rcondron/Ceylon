@@ -1,26 +1,41 @@
+// =============================================================================
+// Crown of Ceylon -- Game Server
+// Stardew Valley x Age of Empires hybrid: multiplayer farming, crafting, trade,
+// day/night cycle, cozy exploration set in 1700s Sri Lanka.
+//
+// Each player controls a single character (not RTS units). The server tracks
+// positions, farm state, buildings, market prices, and relays everything over
+// WebSocket so multiple browsers stay in sync.
+// =============================================================================
+
 const http = require('http');
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 3000;
 
-// MIME types
+// -- MIME types for static file serving ---------------------------------------
+
 const MIME = {
   '.html': 'text/html',
-  '.js': 'application/javascript',
-  '.css': 'text/css',
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.svg': 'image/svg+xml',
+  '.js':   'application/javascript',
+  '.css':  'text/css',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.svg':  'image/svg+xml',
   '.json': 'application/json',
+  '.ico':  'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2':'font/woff2',
 };
 
-// HTTP server for static files
-const server = http.createServer((req, res) => {
-  let filePath = req.url === '/' ? '/index.html' : req.url;
-  filePath = path.join(__dirname, 'public', filePath);
+// -- HTTP server (static files from /public) ----------------------------------
 
+const server = http.createServer((req, res) => {
+  let urlPath = req.url === '/' ? '/index.html' : req.url;
+  urlPath = urlPath.split('?')[0];                       // strip query strings
+  const filePath = path.join(__dirname, 'public', urlPath);
   const ext = path.extname(filePath);
   const contentType = MIME[ext] || 'application/octet-stream';
 
@@ -35,154 +50,242 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// ── Game State ──────────────────────────────────────────────────────────────
+// =============================================================================
+// Constants
+// =============================================================================
 
-const MAP_WIDTH = 128;
-const MAP_HEIGHT = 128;
+// Warm, cozy palette for player characters
+const PLAYER_COLORS = [
+  '#c07848', '#5090c0', '#80a848', '#c0a050',
+  '#a06898', '#50a0a0', '#c08060', '#7080c0',
+];
+
+const TICK_RATE = 100;  // milliseconds per server tick
+const STATE_BROADCAST_INTERVAL  = 5;   // broadcast full state every N ticks
+const MARKET_FLUCTUATION_INTERVAL = 200; // market re-prices every N ticks
+
+// -- Recipes (mirrors client-side RECIPES) ------------------------------------
+
+const RECIPES = {
+  driedTea:     { input: { tea: 3 },               output: { driedTea: 1 } },
+  packagedTea:  { input: { driedTea: 2 },           output: { packagedTea: 1 } },
+  spiceBundle:  { input: { cinnamon: 2, spice: 1 }, output: { spiceBundle: 1 } },
+  milledRice:   { input: { rice: 4 },               output: { milledRice: 2 } },
+  cutGem:       { input: { sapphire: 1 },           output: { cutGem: 1 } },
+  cutRuby:      { input: { ruby: 1 },               output: { cutGem: 1 } },
+  jewelry:      { input: { cutGem: 1, gold: 5 },    output: { jewelry: 1 } },
+  food:         { input: { rice: 2 },                output: { food: 1 } },
+};
+
+// -- Building costs (mirrors client-side BUILD_COSTS) -------------------------
+
+const BUILD_COSTS = {
+  house:       { wood: 20, stone: 10 },
+  farm:        { wood: 10 },
+  smelter:     { stone: 15, wood: 5 },
+  gemCutter:   { wood: 10, stone: 5 },
+  dryingRack:  { wood: 15 },
+  carpentry:   { wood: 20, stone: 5 },
+  warehouse:   { wood: 25, stone: 15 },
+  tradingPost: { wood: 20, stone: 10, gold: 30 },
+  dock:        { wood: 30, stone: 10 },
+  road:        { stone: 3 },
+  well:        { stone: 10, wood: 5 },
+  marketStall: { wood: 15, gold: 20 },
+};
+
+// -- Base market prices (supply/demand shifts these at runtime) ---------------
+
+const BASE_MARKET_PRICES = {
+  tea: 8,    driedTea: 18,   packagedTea: 35,
+  rice: 4,   milledRice: 12,
+  cinnamon: 12, spiceBundle: 30,
+  sapphire: 25, ruby: 30, moonstone: 20,
+  cutGem: 60,  jewelry: 120,
+  wood: 3,   stone: 4,  food: 5,
+};
+
+// =============================================================================
+// Colombo spawn-point finder
+// Replicates the minimal procedural-noise logic from the client map generator
+// (seed 42) so the server can place new players at colomboX + 4, colomboY.
+// =============================================================================
+
+function findColombo(seed) {
+  const MAP_W = 128, MAP_H = 128;
+
+  function seededRandom(v) {
+    const s = Math.sin(v * 127.1 + seed * 311.7) * 43758.5453123;
+    return s - Math.floor(s);
+  }
+
+  function noise2D(x, y) {
+    const ix = Math.floor(x), iy = Math.floor(y);
+    const fx = x - ix,        fy = y - iy;
+    const a = seededRandom(ix     + iy * 57);
+    const b = seededRandom(ix + 1 + iy * 57);
+    const c = seededRandom(ix     + (iy + 1) * 57);
+    const d = seededRandom(ix + 1 + (iy + 1) * 57);
+    const ux = fx * fx * (3 - 2 * fx);
+    const uy = fy * fy * (3 - 2 * fy);
+    return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+  }
+
+  function fbm(x, y, octaves, lac, gain) {
+    let sum = 0, amp = 1, freq = 1, max = 0;
+    for (let i = 0; i < octaves; i++) {
+      sum += noise2D(x * freq, y * freq) * amp;
+      max += amp;
+      amp  *= gain;
+      freq *= lac;
+    }
+    return sum / max;
+  }
+
+  function islandMask(x, y) {
+    const nx = x / MAP_W, ny = y / MAP_H;
+    const dx = (nx - 0.5)  * 2.2;
+    const dy = (ny - 0.48) * 2.0;
+    let d = dx * dx * 1.2 + dy * dy;
+    if (ny < 0.3)  { d = dx * dx * (1 + (0.3 - ny) * 4) * 2 + dy * dy; }
+    if (ny > 0.6)  { d *= 0.85; }
+    if (nx > 0.55 && ny > 0.3 && ny < 0.6) { d += 0.05; }
+    return 1 - Math.min(1, d * 1.3);
+  }
+
+  const targetY = Math.floor(MAP_H * 0.45);           // same as client
+  for (let x = 0; x < MAP_W; x++) {
+    const island    = islandMask(x, targetY);
+    const elevation = fbm(x * 0.03, targetY * 0.03, 6, 2.0, 0.5);
+    const h = elevation * island;
+    // SAND (0.12-0.16) or GRASS (0.16-0.65) -- first walkable coastal tile
+    if (h >= 0.12 && h < 0.65) {
+      return { x, y: targetY };
+    }
+  }
+  return { x: 30, y: targetY };                       // safe fallback
+}
+
+const colombo   = findColombo(42);
+const COLOMBO_X = colombo.x;
+const COLOMBO_Y = colombo.y;
+
+// =============================================================================
+// Game State
+// =============================================================================
 
 const gameState = {
-  players: new Map(),
-  units: new Map(),
-  buildings: new Map(),
-  resources: new Map(),
-  trades: [],
-  market: {
-    tea: { price: 100, supply: 0 },
-    spice: { price: 150, supply: 0 },
-    rice: { price: 60, supply: 0 },
-    cinnamon: { price: 200, supply: 0 },
-    sapphire: { price: 500, supply: 0 },
-    ruby: { price: 600, supply: 0 },
-    moonstone: { price: 400, supply: 0 },
-  },
-  nextId: 1,
-  tick: 0,
+  players:      new Map(),   // playerId -> player object
+  buildings:    new Map(),   // buildingId -> building object
+  farmPlots:    new Map(),   // "x,y" -> { crop, stage, watered, daysGrown, owner }
+  market:       { ...BASE_MARKET_PRICES },
+  marketSupply: {},          // resource -> cumulative units sold (drives price down)
+  dayCount:     1,
+  season:       'monsoon',
+  tick:         0,
+  nextId:       1,
+  sleepVotes:   new Set(),
 };
 
 function generateId() {
   return gameState.nextId++;
 }
 
-// ── WebSocket multiplayer ───────────────────────────────────────────────────
+// =============================================================================
+// WebSocket Server
+// =============================================================================
 
-const wss = new WebSocketServer({ server });
-
-const clients = new Map();
+const wss     = new WebSocketServer({ server });
+const clients = new Map();  // playerId -> ws
 
 wss.on('connection', (ws) => {
-  const playerId = generateId();
+  const playerId   = generateId();
+  const colorIndex = (playerId - 1) % PLAYER_COLORS.length;
+
   const player = {
-    id: playerId,
-    name: `Explorer ${playerId}`,
-    color: PLAYER_COLORS[playerId % PLAYER_COLORS.length],
-    resources: { gold: 500, food: 200, wood: 100, stone: 50 },
-    inventory: {},
-    explored: new Set(),
+    id:        playerId,
+    name:      `Explorer ${playerId}`,
+    color:     PLAYER_COLORS[colorIndex],
+    x:         COLOMBO_X + 4,
+    y:         COLOMBO_Y,
+    direction: 0,
+    moving:    false,
+    gold:      50,
+    energy:    100,
+    maxEnergy: 100,
     reputation: 0,
+    inventory: [
+      { item: 'wood', count: 10 },
+      { item: 'food', count: 5 },
+    ],
+    online:    true,
   };
 
   gameState.players.set(playerId, player);
   clients.set(playerId, ws);
 
-  // Create starting units for this player
-  const startPositions = [
-    { x: 20, y: 100 }, { x: 100, y: 20 },
-    { x: 100, y: 100 }, { x: 20, y: 20 },
-  ];
-  const startPos = startPositions[(playerId - 1) % startPositions.length];
+  console.log(`Player ${player.name} (${player.color}) connected.`);
 
-  const startingUnits = [];
-  for (let i = 0; i < 3; i++) {
-    const unit = {
-      id: generateId(),
-      playerId,
-      type: i === 0 ? 'explorer' : 'worker',
-      x: startPos.x + i * 2,
-      y: startPos.y,
-      hp: 100,
-      maxHp: 100,
-      task: null,
-      targetX: null,
-      targetY: null,
-      carryType: null,
-      carryAmount: 0,
-      speed: i === 0 ? 1.5 : 1.0,
-    };
-    gameState.units.set(unit.id, unit);
-    startingUnits.push(unit);
-  }
+  // -- Send initialisation packet to the new player --------------------------
 
-  // Reveal starting area
-  revealArea(player, startPos.x, startPos.y, 8);
-
-  // Send initial state to new player
   ws.send(JSON.stringify({
-    type: 'init',
+    type:      'init',
     playerId,
-    player,
-    units: startingUnits,
-    explored: Array.from(player.explored),
-    market: gameState.market,
+    startX:    player.x,
+    startY:    player.y,
+    color:     player.color,
+    name:      player.name,
+    gold:      player.gold,
+    inventory: player.inventory,
   }));
 
-  // Broadcast new player to others
+  // -- Notify everyone else ---------------------------------------------------
+
   broadcast({
-    type: 'player_joined',
+    type:     'player_joined',
     playerId,
-    name: player.name,
-    color: player.color,
+    name:     player.name,
   }, playerId);
 
-  // Send existing state
+  // -- Send current world snapshot to the newcomer ----------------------------
+
   ws.send(JSON.stringify({
-    type: 'world_state',
-    units: Array.from(gameState.units.values()).filter(u => {
-      const key = `${Math.floor(u.x)},${Math.floor(u.y)}`;
-      return player.explored.has(key);
-    }),
-    buildings: Array.from(gameState.buildings.values()).filter(b => {
-      const key = `${Math.floor(b.x)},${Math.floor(b.y)}`;
-      return player.explored.has(key);
-    }),
+    type:         'state_update',
+    players:      getPlayersStateFor(playerId),
+    buildings:    Array.from(gameState.buildings.values()),
+    marketPrices: gameState.market,
   }));
 
-  ws.on('message', (data) => {
+  // -- Incoming messages ------------------------------------------------------
+
+  ws.on('message', (raw) => {
     try {
-      const msg = JSON.parse(data);
+      const msg = JSON.parse(raw);
       handleMessage(playerId, msg);
     } catch (e) {
-      console.error('Invalid message:', e);
+      console.error(`Bad message from player ${playerId}:`, e.message);
     }
   });
+
+  // -- Disconnect -------------------------------------------------------------
 
   ws.on('close', () => {
     clients.delete(playerId);
-    // Keep player data but mark offline
     const p = gameState.players.get(playerId);
-    if (p) p.online = false;
-    broadcast({ type: 'player_left', playerId });
+    if (p) {
+      p.online = false;
+      console.log(`Player ${p.name} disconnected.`);
+      broadcast({ type: 'player_left', playerId, name: p.name });
+    }
+    gameState.sleepVotes.delete(playerId);
   });
 });
 
-const PLAYER_COLORS = [
-  '#c23616', '#0097e6', '#44bd32', '#e1b12c',
-  '#8c7ae6', '#e84393', '#00cec9', '#fd79a8',
-];
+// =============================================================================
+// Helpers
+// =============================================================================
 
-function revealArea(player, cx, cy, radius) {
-  for (let dy = -radius; dy <= radius; dy++) {
-    for (let dx = -radius; dx <= radius; dx++) {
-      if (dx * dx + dy * dy <= radius * radius) {
-        const tx = Math.floor(cx + dx);
-        const ty = Math.floor(cy + dy);
-        if (tx >= 0 && tx < MAP_WIDTH && ty >= 0 && ty < MAP_HEIGHT) {
-          player.explored.add(`${tx},${ty}`);
-        }
-      }
-    }
-  }
-}
-
+/** Send to every connected client except `excludeId`. */
 function broadcast(msg, excludeId) {
   const data = JSON.stringify(msg);
   for (const [pid, ws] of clients) {
@@ -192,6 +295,17 @@ function broadcast(msg, excludeId) {
   }
 }
 
+/** Send to every connected client including the sender. */
+function broadcastAll(msg) {
+  const data = JSON.stringify(msg);
+  for (const [, ws] of clients) {
+    if (ws.readyState === 1) {
+      ws.send(data);
+    }
+  }
+}
+
+/** Send to a single player. */
 function sendTo(playerId, msg) {
   const ws = clients.get(playerId);
   if (ws && ws.readyState === 1) {
@@ -199,418 +313,455 @@ function sendTo(playerId, msg) {
   }
 }
 
-// ── Message Handling ────────────────────────────────────────────────────────
+/** Build a list of other online players for a state_update packet. */
+function getPlayersStateFor(excludeId) {
+  const list = [];
+  for (const [id, p] of gameState.players) {
+    if (id === excludeId || !p.online) continue;
+    list.push({
+      id:        p.id,
+      name:      p.name,
+      color:     p.color,
+      x:         p.x,
+      y:         p.y,
+      direction: p.direction,
+      moving:    p.moving,
+    });
+  }
+  return list;
+}
+
+// -- Inventory helpers (server-side mirror of client logic) -------------------
+
+function getInvCount(player, item) {
+  const slot = player.inventory.find(s => s.item === item);
+  return slot ? slot.count : 0;
+}
+
+function addInv(player, item, count) {
+  const slot = player.inventory.find(s => s.item === item);
+  if (slot) { slot.count += count; }
+  else      { player.inventory.push({ item, count }); }
+}
+
+function removeInv(player, item, count) {
+  const slot = player.inventory.find(s => s.item === item);
+  if (!slot || slot.count < count) return false;
+  slot.count -= count;
+  if (slot.count <= 0) {
+    player.inventory = player.inventory.filter(s => s.count > 0);
+  }
+  return true;
+}
+
+/** Check whether `player` owns enough of every resource in `costs`. */
+function hasResources(player, costs) {
+  for (const [item, amount] of Object.entries(costs)) {
+    if (item === 'gold') { if (player.gold < amount) return false; }
+    else                 { if (getInvCount(player, item) < amount) return false; }
+  }
+  return true;
+}
+
+/** Deduct `costs` from the player (gold + inventory). */
+function spendResources(player, costs) {
+  for (const [item, amount] of Object.entries(costs)) {
+    if (item === 'gold') { player.gold -= amount; }
+    else                 { removeInv(player, item, amount); }
+  }
+}
+
+// =============================================================================
+// Message Router
+// =============================================================================
 
 function handleMessage(playerId, msg) {
+  const player = gameState.players.get(playerId);
+  if (!player) return;
+
   switch (msg.type) {
-    case 'move_units':
-      handleMoveUnits(playerId, msg);
-      break;
-    case 'assign_task':
-      handleAssignTask(playerId, msg);
-      break;
-    case 'build':
-      handleBuild(playerId, msg);
-      break;
-    case 'trade':
-      handleTrade(playerId, msg);
-      break;
-    case 'sell_to_market':
-      handleSellToMarket(playerId, msg);
-      break;
-    case 'chat':
-      broadcast({ type: 'chat', playerId, text: msg.text });
-      break;
+    case 'player_move':    handlePlayerMove(player, msg);    break;
+    case 'farm_action':    handleFarmAction(player, msg);    break;
+    case 'gather':         handleGather(player, msg);        break;
+    case 'craft':          handleCraft(player, msg);         break;
+    case 'build':          handleBuild(player, msg);         break;
+    case 'sell_to_market': handleSellToMarket(player, msg);  break;
+    case 'trade':          handleTrade(player, msg);         break;
+    case 'chat':           handleChat(player, msg);          break;
+    case 'sleep':          handleSleep(player);              break;
+    default: break; // unknown message -- silently ignored
   }
 }
 
-function handleMoveUnits(playerId, msg) {
-  const { unitIds, targetX, targetY } = msg;
-  for (const uid of unitIds) {
-    const unit = gameState.units.get(uid);
-    if (unit && unit.playerId === playerId) {
-      unit.targetX = targetX;
-      unit.targetY = targetY;
-      unit.task = 'moving';
+// =============================================================================
+// Message Handlers
+// =============================================================================
+
+// -- Movement -----------------------------------------------------------------
+
+function handlePlayerMove(player, msg) {
+  if (typeof msg.x === 'number') player.x = msg.x;
+  if (typeof msg.y === 'number') player.y = msg.y;
+  if (typeof msg.direction === 'number') player.direction = msg.direction;
+  if (typeof msg.moving === 'boolean')   player.moving    = msg.moving;
+}
+
+// -- Farming ------------------------------------------------------------------
+
+function handleFarmAction(player, msg) {
+  const { action, x, y, cropType } = msg;
+  if (typeof x !== 'number' || typeof y !== 'number') return;
+  const key = `${Math.floor(x)},${Math.floor(y)}`;
+
+  switch (action) {
+    case 'till': {
+      if (!gameState.farmPlots.has(key)) {
+        gameState.farmPlots.set(key, {
+          crop: null, stage: 0, watered: false, daysGrown: 0, owner: player.id,
+        });
+      }
+      broadcast({ type: 'farm_update', action: 'till', x, y }, player.id);
+      break;
+    }
+
+    case 'water': {
+      const plot = gameState.farmPlots.get(key);
+      if (plot) {
+        plot.watered = true;
+        broadcast({ type: 'farm_update', action: 'water', x, y }, player.id);
+      }
+      break;
+    }
+
+    case 'plant': {
+      const plot = gameState.farmPlots.get(key);
+      if (plot && !plot.crop && cropType) {
+        plot.crop      = cropType;
+        plot.stage     = 0;
+        plot.daysGrown = 0;
+        broadcast({ type: 'farm_update', action: 'plant', x, y, cropType }, player.id);
+      }
+      break;
+    }
+
+    case 'harvest': {
+      const plot = gameState.farmPlots.get(key);
+      if (plot && plot.crop && plot.stage >= 4) {
+        // Reset the plot so it can be replanted
+        plot.crop      = null;
+        plot.stage     = 0;
+        plot.daysGrown = 0;
+        broadcast({ type: 'farm_update', action: 'harvest', x, y }, player.id);
+      }
+      break;
     }
   }
 }
 
-function handleAssignTask(playerId, msg) {
-  const { unitId, task, targetId } = msg;
-  const unit = gameState.units.get(unitId);
-  if (!unit || unit.playerId !== playerId) return;
+// -- Gathering ----------------------------------------------------------------
 
-  if (task === 'harvest') {
-    const res = gameState.resources.get(targetId);
-    if (res) {
-      unit.task = 'harvesting';
-      unit.taskTarget = targetId;
-      unit.targetX = res.x;
-      unit.targetY = res.y;
-    }
-  } else if (task === 'build') {
-    const bld = gameState.buildings.get(targetId);
-    if (bld) {
-      unit.task = 'building';
-      unit.taskTarget = targetId;
-      unit.targetX = bld.x;
-      unit.targetY = bld.y;
-    }
-  } else if (task === 'explore') {
-    unit.task = 'exploring';
-    unit.targetX = msg.targetX;
-    unit.targetY = msg.targetY;
-  }
-}
-
-function handleBuild(playerId, msg) {
-  const { buildingType, x, y } = msg;
-  const player = gameState.players.get(playerId);
-  if (!player) return;
-
-  const costs = BUILDING_COSTS[buildingType];
-  if (!costs) return;
-
-  // Check resources
-  for (const [res, amount] of Object.entries(costs)) {
-    if ((player.resources[res] || 0) < amount) {
-      sendTo(playerId, { type: 'error', text: `Not enough ${res}` });
-      return;
-    }
-  }
-
-  // Deduct resources
-  for (const [res, amount] of Object.entries(costs)) {
-    player.resources[res] -= amount;
-  }
-
-  const building = {
-    id: generateId(),
-    playerId,
-    type: buildingType,
-    x, y,
-    hp: BUILDING_DATA[buildingType].maxHp,
-    maxHp: BUILDING_DATA[buildingType].maxHp,
-    built: 0, // 0 to 100 progress
-    workers: [],
-  };
-
-  gameState.buildings.set(building.id, building);
-
+function handleGather(player, msg) {
+  // The client has already deducted from the local resource node and added to
+  // its own inventory. The server relays the event so other clients can mirror
+  // the depletion on their local maps.
+  if (msg.nodeId == null) return;
   broadcast({
-    type: 'building_placed',
-    building,
+    type:     'gather_sync',
+    playerId: player.id,
+    nodeId:   msg.nodeId,
+  }, player.id);
+}
+
+// -- Crafting -----------------------------------------------------------------
+
+function handleCraft(player, msg) {
+  const recipe = RECIPES[msg.recipe];
+  if (!recipe) return;
+
+  // Validate the player has the required inputs
+  if (!hasResources(player, recipe.input)) return;
+
+  // Deduct inputs
+  spendResources(player, recipe.input);
+
+  // Grant outputs
+  for (const [item, count] of Object.entries(recipe.output)) {
+    addInv(player, item, count);
+  }
+
+  sendTo(player.id, {
+    type:      'resource_update',
+    gold:      player.gold,
+    inventory: player.inventory,
   });
-
-  sendTo(playerId, { type: 'resources_update', resources: player.resources });
 }
 
-function handleTrade(playerId, msg) {
-  const { targetPlayerId, offer, request } = msg;
-  const player = gameState.players.get(playerId);
-  const target = gameState.players.get(targetPlayerId);
-  if (!player || !target) return;
+// -- Building -----------------------------------------------------------------
 
-  // Simple direct trade
-  for (const [res, amount] of Object.entries(offer)) {
-    if ((player.resources[res] || 0) < amount) {
-      sendTo(playerId, { type: 'error', text: `Not enough ${res} to trade` });
-      return;
-    }
-  }
+function handleBuild(player, msg) {
+  const { buildingType, x, y } = msg;
+  const costs = BUILD_COSTS[buildingType];
+  if (!costs) return;
+  if (typeof x !== 'number' || typeof y !== 'number') return;
 
-  for (const [res, amount] of Object.entries(offer)) {
-    player.resources[res] = (player.resources[res] || 0) - amount;
-    target.resources[res] = (target.resources[res] || 0) + amount;
-  }
-  for (const [res, amount] of Object.entries(request)) {
-    target.resources[res] = (target.resources[res] || 0) - amount;
-    player.resources[res] = (player.resources[res] || 0) + amount;
-  }
-
-  sendTo(playerId, { type: 'resources_update', resources: player.resources });
-  sendTo(targetPlayerId, { type: 'resources_update', resources: target.resources });
-}
-
-function handleSellToMarket(playerId, msg) {
-  const { resource, amount } = msg;
-  const player = gameState.players.get(playerId);
-  if (!player) return;
-
-  const inv = player.inventory[resource] || 0;
-  if (inv < amount) {
-    sendTo(playerId, { type: 'error', text: `Not enough ${resource}` });
+  // Validate resources
+  if (!hasResources(player, costs)) {
+    sendTo(player.id, { type: 'error', text: 'Not enough resources' });
     return;
   }
 
-  const market = gameState.market[resource];
-  if (!market) return;
+  // Deduct cost
+  spendResources(player, costs);
 
-  const revenue = Math.floor(market.price * amount);
-  player.inventory[resource] -= amount;
-  player.resources.gold += revenue;
-  market.supply += amount;
+  const building = {
+    id:    generateId(),
+    type:  buildingType,
+    x, y,
+    owner: player.id,
+    built: 100,
+    color: player.color,
+  };
+  gameState.buildings.set(building.id, building);
 
-  // Price drops with supply
-  market.price = Math.max(10, Math.floor(market.price * (1 - amount * 0.01)));
-
-  sendTo(playerId, {
-    type: 'resources_update',
-    resources: player.resources,
+  // Confirm to builder and update their resources
+  sendTo(player.id, { type: 'build_confirm', building });
+  sendTo(player.id, {
+    type:      'resource_update',
+    gold:      player.gold,
     inventory: player.inventory,
   });
-  broadcast({ type: 'market_update', market: gameState.market });
+
+  // Tell everyone else about the new building
+  broadcast({ type: 'build_confirm', building }, player.id);
 }
 
-const BUILDING_COSTS = {
-  camp: { wood: 30, gold: 20 },
-  farm: { wood: 40, gold: 30 },
-  mine: { wood: 50, stone: 30, gold: 50 },
-  warehouse: { wood: 60, stone: 40, gold: 40 },
-  road: { stone: 10 },
-  dock: { wood: 80, stone: 50, gold: 100 },
-  tradingPost: { wood: 60, stone: 30, gold: 80 },
-};
+// -- Sell to market -----------------------------------------------------------
 
-const BUILDING_DATA = {
-  camp: { maxHp: 200, sizeX: 2, sizeY: 2 },
-  farm: { maxHp: 150, sizeX: 3, sizeY: 3 },
-  mine: { maxHp: 300, sizeX: 2, sizeY: 2 },
-  warehouse: { maxHp: 250, sizeX: 3, sizeY: 2 },
-  road: { maxHp: 50, sizeX: 1, sizeY: 1 },
-  dock: { maxHp: 300, sizeX: 3, sizeY: 3 },
-  tradingPost: { maxHp: 200, sizeX: 2, sizeY: 2 },
-};
+function handleSellToMarket(player, msg) {
+  const { resource, amount } = msg;
+  if (!resource || typeof amount !== 'number' || amount <= 0) return;
 
-// ── Game Simulation Tick ────────────────────────────────────────────────────
+  const held = getInvCount(player, resource);
+  if (held < amount) {
+    sendTo(player.id, { type: 'error', text: `Not enough ${resource}` });
+    return;
+  }
 
-const TICK_RATE = 100; // ms
+  const unitPrice = gameState.market[resource];
+  if (unitPrice == null) return;
+
+  const revenue = unitPrice * amount;
+  removeInv(player, resource, amount);
+  player.gold += revenue;
+
+  // Supply pressure drives the price down
+  gameState.marketSupply[resource] =
+    (gameState.marketSupply[resource] || 0) + amount;
+  gameState.market[resource] =
+    Math.max(1, Math.floor(unitPrice * (1 - amount * 0.02)));
+
+  sendTo(player.id, {
+    type:      'resource_update',
+    gold:      player.gold,
+    inventory: player.inventory,
+  });
+  sendTo(player.id, {
+    type:   'trade_complete',
+    earned: revenue,
+    gold:   player.gold,
+  });
+
+  broadcastAll({ type: 'market_update', prices: gameState.market });
+}
+
+// -- Player-to-player trade ---------------------------------------------------
+
+function handleTrade(player, msg) {
+  const { targetPlayerId, offer, request } = msg;
+  const target = gameState.players.get(targetPlayerId);
+  if (!target || !target.online) {
+    sendTo(player.id, { type: 'error', text: 'Player not available' });
+    return;
+  }
+
+  // Validate offering side
+  for (const [item, count] of Object.entries(offer || {})) {
+    if (item === 'gold') {
+      if (player.gold < count) {
+        sendTo(player.id, { type: 'error', text: `Not enough gold to offer` });
+        return;
+      }
+    } else if (getInvCount(player, item) < count) {
+      sendTo(player.id, { type: 'error', text: `Not enough ${item} to offer` });
+      return;
+    }
+  }
+
+  // Validate requesting side
+  for (const [item, count] of Object.entries(request || {})) {
+    if (item === 'gold') {
+      if (target.gold < count) {
+        sendTo(player.id, { type: 'error', text: `Other player lacks gold` });
+        return;
+      }
+    } else if (getInvCount(target, item) < count) {
+      sendTo(player.id, { type: 'error', text: `Other player lacks ${item}` });
+      return;
+    }
+  }
+
+  // Transfer offered resources: player -> target
+  for (const [item, count] of Object.entries(offer || {})) {
+    if (item === 'gold') { player.gold -= count; target.gold += count; }
+    else { removeInv(player, item, count); addInv(target, item, count); }
+  }
+
+  // Transfer requested resources: target -> player
+  for (const [item, count] of Object.entries(request || {})) {
+    if (item === 'gold') { target.gold -= count; player.gold += count; }
+    else { removeInv(target, item, count); addInv(player, item, count); }
+  }
+
+  sendTo(player.id, {
+    type:      'resource_update',
+    gold:      player.gold,
+    inventory: player.inventory,
+  });
+  sendTo(target.id, {
+    type:      'resource_update',
+    gold:      target.gold,
+    inventory: target.inventory,
+  });
+}
+
+// -- Chat ---------------------------------------------------------------------
+
+function handleChat(player, msg) {
+  const text = (msg.text || '').slice(0, 200);  // enforce length limit
+  if (!text) return;
+  broadcastAll({
+    type:     'chat',
+    playerId: player.id,
+    name:     player.name,
+    text,
+  });
+}
+
+// -- Sleep (day advance) ------------------------------------------------------
+
+function handleSleep(player) {
+  gameState.sleepVotes.add(player.id);
+
+  // Day advances once ALL online players have requested sleep
+  const onlineCount = [...gameState.players.values()].filter(p => p.online).length;
+  if (onlineCount > 0 && gameState.sleepVotes.size >= onlineCount) {
+    advanceDay();
+  }
+}
+
+// =============================================================================
+// Day / Night Cycle
+// =============================================================================
+
+function advanceDay() {
+  gameState.dayCount++;
+  gameState.sleepVotes.clear();
+
+  // Rotate season every 7 in-game days
+  const SEASONS = ['monsoon', 'dry', 'harvest', 'planting'];
+  gameState.season = SEASONS[Math.floor((gameState.dayCount - 1) / 7) % SEASONS.length];
+
+  // Grow crops in watered farm plots
+  for (const [, plot] of gameState.farmPlots) {
+    if (!plot.crop) continue;
+    if (plot.watered) {
+      plot.daysGrown++;
+      const growthTime = { tea: 4, rice: 3, cinnamon: 6, spice: 5 };
+      const needed = growthTime[plot.crop] || 4;
+      plot.stage = Math.min(4, Math.floor((plot.daysGrown / needed) * 4));
+    }
+    plot.watered = false;          // soil dries overnight
+  }
+
+  // Restore energy for all online players
+  for (const p of gameState.players.values()) {
+    if (p.online) {
+      p.energy = p.maxEnergy;
+    }
+  }
+
+  broadcastAll({
+    type:   'day_advance',
+    day:    gameState.dayCount,
+    season: gameState.season,
+  });
+
+  console.log(`Day ${gameState.dayCount} -- ${gameState.season} season`);
+}
+
+// =============================================================================
+// Market Price Fluctuation
+// =============================================================================
+
+function fluctuateMarket() {
+  for (const [resource, basePrice] of Object.entries(BASE_MARKET_PRICES)) {
+    const current  = gameState.market[resource];
+    const supply   = gameState.marketSupply[resource] || 0;
+
+    // Drift toward base price (mean reversion)
+    const drift = (basePrice - current) * 0.08;
+
+    // Random noise proportional to base price
+    const noise = (Math.random() - 0.5) * basePrice * 0.1;
+
+    // Excess supply pushes price down
+    const supplyPressure = -supply * 0.02;
+
+    gameState.market[resource] =
+      Math.max(1, Math.round(current + drift + noise + supplyPressure));
+
+    // Supply gradually decays (goods absorbed by NPC economy)
+    if (supply > 0) {
+      gameState.marketSupply[resource] = Math.max(0, supply - 1);
+    }
+  }
+
+  broadcastAll({ type: 'market_update', prices: gameState.market });
+}
+
+// =============================================================================
+// Tick-Based Game Loop (100 ms)
+// =============================================================================
 
 function gameTick() {
   gameState.tick++;
 
-  // Update units
-  for (const unit of gameState.units.values()) {
-    updateUnit(unit);
-  }
-
-  // Update buildings (production)
-  if (gameState.tick % 50 === 0) {
-    updateProduction();
-  }
-
-  // Market fluctuation
-  if (gameState.tick % 200 === 0) {
+  // Fluctuate market prices periodically
+  if (gameState.tick % MARKET_FLUCTUATION_INTERVAL === 0) {
     fluctuateMarket();
   }
 
-  // Send unit position updates
-  if (gameState.tick % 3 === 0) {
-    const unitPositions = [];
-    for (const unit of gameState.units.values()) {
-      unitPositions.push({
-        id: unit.id,
-        x: unit.x,
-        y: unit.y,
-        task: unit.task,
-        carryType: unit.carryType,
-        carryAmount: unit.carryAmount,
-      });
-    }
-    broadcast({ type: 'unit_positions', units: unitPositions });
-  }
-}
-
-function updateUnit(unit) {
-  if (unit.targetX == null || unit.targetY == null) return;
-
-  const dx = unit.targetX - unit.x;
-  const dy = unit.targetY - unit.y;
-  const dist = Math.sqrt(dx * dx + dy * dy);
-
-  if (dist < 0.5) {
-    // Arrived at target
-    if (unit.task === 'moving') {
-      unit.task = null;
-      unit.targetX = null;
-      unit.targetY = null;
-    } else if (unit.task === 'harvesting') {
-      harvestTick(unit);
-    } else if (unit.task === 'building') {
-      buildTick(unit);
-    } else if (unit.task === 'exploring') {
-      const player = gameState.players.get(unit.playerId);
-      if (player) {
-        const radius = unit.type === 'explorer' ? 10 : 6;
-        revealArea(player, unit.x, unit.y, radius);
-        sendTo(unit.playerId, {
-          type: 'fog_reveal',
-          explored: Array.from(player.explored),
-        });
-
-        // Check for discovery
-        checkDiscovery(unit, player);
-      }
-      unit.task = null;
-      unit.targetX = null;
-      unit.targetY = null;
-    }
-    return;
-  }
-
-  // Move toward target
-  const speed = unit.speed * 0.15;
-  unit.x += (dx / dist) * speed;
-  unit.y += (dy / dist) * speed;
-
-  // Reveal fog as unit moves
-  const player = gameState.players.get(unit.playerId);
-  if (player) {
-    const radius = unit.type === 'explorer' ? 8 : 4;
-    revealArea(player, unit.x, unit.y, radius);
-  }
-}
-
-function harvestTick(unit) {
-  const res = gameState.resources.get(unit.taskTarget);
-  if (!res || res.amount <= 0) {
-    unit.task = null;
-    unit.taskTarget = null;
-    return;
-  }
-
-  if (unit.carryAmount >= 10) {
-    // Need to drop off at nearest warehouse/camp
-    const dropoff = findNearestDropoff(unit);
-    if (dropoff) {
-      unit.task = 'returning';
-      unit.targetX = dropoff.x;
-      unit.targetY = dropoff.y;
-      unit.dropoffId = dropoff.id;
-    }
-    return;
-  }
-
-  const harvestRate = unit.type === 'worker' ? 1 : 0.5;
-  const harvested = Math.min(harvestRate, res.amount);
-  res.amount -= harvested;
-  unit.carryType = res.resourceType;
-  unit.carryAmount += harvested;
-
-  if (res.amount <= 0) {
-    gameState.resources.delete(res.id);
-    broadcast({ type: 'resource_depleted', id: res.id });
-  }
-}
-
-function buildTick(unit) {
-  const bld = gameState.buildings.get(unit.taskTarget);
-  if (!bld || bld.built >= 100) {
-    unit.task = null;
-    unit.taskTarget = null;
-    return;
-  }
-
-  bld.built = Math.min(100, bld.built + 2);
-  if (bld.built >= 100) {
-    broadcast({ type: 'building_complete', id: bld.id });
-  }
-}
-
-function findNearestDropoff(unit) {
-  let nearest = null;
-  let nearestDist = Infinity;
-  for (const bld of gameState.buildings.values()) {
-    if (bld.playerId !== unit.playerId) continue;
-    if (bld.built < 100) continue;
-    if (!['camp', 'warehouse', 'tradingPost'].includes(bld.type)) continue;
-    const d = Math.sqrt((bld.x - unit.x) ** 2 + (bld.y - unit.y) ** 2);
-    if (d < nearestDist) {
-      nearestDist = d;
-      nearest = bld;
+  // Broadcast full state snapshot to all players every N ticks
+  if (gameState.tick % STATE_BROADCAST_INTERVAL === 0) {
+    for (const [pid, ws] of clients) {
+      if (ws.readyState !== 1) continue;
+      ws.send(JSON.stringify({
+        type:         'state_update',
+        players:      getPlayersStateFor(pid),
+        buildings:    Array.from(gameState.buildings.values()),
+        marketPrices: gameState.market,
+      }));
     }
   }
-  return nearest;
-}
-
-function checkDiscovery(unit, player) {
-  // Chance to discover something at the explore destination
-  const roll = Math.random();
-  if (roll < 0.15) {
-    // Discover a ruin
-    const discoveries = [
-      { type: 'artifact', name: 'Ancient Scroll', bonus: { reputation: 10 } },
-      { type: 'artifact', name: 'Stone Idol', bonus: { reputation: 15 } },
-      { type: 'lore', name: 'Temple Inscription', bonus: { reputation: 5 } },
-      { type: 'resource_cache', name: 'Hidden Gem Cache', bonus: { sapphire: 5 } },
-      { type: 'resource_cache', name: 'Abandoned Storehouse', bonus: { food: 100, wood: 50 } },
-      { type: 'ruin', name: 'Ancient City Ruins', bonus: { reputation: 25, gold: 200 } },
-    ];
-    const disc = discoveries[Math.floor(Math.random() * discoveries.length)];
-    player.reputation += disc.bonus.reputation || 0;
-    for (const [key, val] of Object.entries(disc.bonus)) {
-      if (key === 'reputation') continue;
-      if (['sapphire', 'ruby', 'moonstone'].includes(key)) {
-        player.inventory[key] = (player.inventory[key] || 0) + val;
-      } else {
-        player.resources[key] = (player.resources[key] || 0) + val;
-      }
-    }
-    sendTo(player.id, {
-      type: 'discovery',
-      discovery: disc,
-      x: unit.x,
-      y: unit.y,
-    });
-    sendTo(player.id, {
-      type: 'resources_update',
-      resources: player.resources,
-      inventory: player.inventory,
-    });
-  }
-}
-
-function updateProduction() {
-  for (const bld of gameState.buildings.values()) {
-    if (bld.built < 100) continue;
-    const player = gameState.players.get(bld.playerId);
-    if (!player) continue;
-
-    if (bld.type === 'farm') {
-      const produce = ['tea', 'spice', 'rice', 'cinnamon'][Math.floor(Math.random() * 4)];
-      player.inventory[produce] = (player.inventory[produce] || 0) + 1;
-    } else if (bld.type === 'mine') {
-      const gem = ['sapphire', 'ruby', 'moonstone'][Math.floor(Math.random() * 3)];
-      if (Math.random() < 0.3) {
-        player.inventory[gem] = (player.inventory[gem] || 0) + 1;
-      }
-    }
-
-    sendTo(bld.playerId, {
-      type: 'resources_update',
-      resources: player.resources,
-      inventory: player.inventory,
-    });
-  }
-}
-
-function fluctuateMarket() {
-  for (const [resource, data] of Object.entries(gameState.market)) {
-    // Prices slowly recover
-    const basePrice = { tea: 100, spice: 150, rice: 60, cinnamon: 200, sapphire: 500, ruby: 600, moonstone: 400 };
-    const drift = (basePrice[resource] - data.price) * 0.05;
-    const noise = (Math.random() - 0.5) * 20;
-    data.price = Math.max(10, Math.round(data.price + drift + noise));
-    data.supply = Math.max(0, data.supply - 1);
-  }
-  broadcast({ type: 'market_update', market: gameState.market });
 }
 
 setInterval(gameTick, TICK_RATE);
 
-// ── Start Server ────────────────────────────────────────────────────────────
+// =============================================================================
+// Start Server
+// =============================================================================
 
 server.listen(PORT, () => {
   console.log(`Crown of Ceylon server running on http://localhost:${PORT}`);
+  console.log(`Colombo spawn point: (${COLOMBO_X}, ${COLOMBO_Y})`);
 });

@@ -1,25 +1,15 @@
 // ═══════════════════════════════════════════════════════════════════════════
 // Crown of Ceylon — Input Handler
-// Mouse, keyboard, drag-select, camera scroll, minimap clicks.
+// WASD character movement, click interactions, hotbar, camera zoom.
 // ═══════════════════════════════════════════════════════════════════════════
 
 const Input = (() => {
   let mouseX = 0, mouseY = 0;
   let mouseWorldX = 0, mouseWorldY = 0;
-  let isDragging = false;
-  let dragStartX = 0, dragStartY = 0;
-  let isBoxSelecting = false;
-  let boxStartX = 0, boxStartY = 0;
-  let isPanning = false;
-  let panStartX = 0, panStartY = 0;
-  let panCamStartX = 0, panCamStartY = 0;
 
-  // Keyboard state
   const keys = {};
-
-  // Edge scrolling
-  const EDGE_MARGIN = 20;
-  const SCROLL_SPEED = 8;
+  let lastDirection = 0; // 0=down, 1=left, 2=up, 3=right
+  let isMoving = false;
 
   function init() {
     const canvas = document.getElementById('game-canvas');
@@ -42,44 +32,21 @@ const Input = (() => {
   }
 
   function onMouseDown(e) {
-    const rect = e.target.getBoundingClientRect();
-    mouseX = e.clientX - rect.left;
-    mouseY = e.clientY - rect.top;
+    mouseX = e.clientX;
+    mouseY = e.clientY;
 
-    if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
-      // Right click: command selected units
+    if (e.button === 0) {
+      // Left click: interact with world
+      const world = Renderer.screenToWorld(mouseX, mouseY);
+      if (typeof game !== 'undefined') {
+        game.onLeftClick(world.x, world.y, e.shiftKey);
+      }
+    } else if (e.button === 2 || (e.button === 0 && e.ctrlKey)) {
+      // Right click: secondary action / examine
       const world = Renderer.screenToWorld(mouseX, mouseY);
       if (typeof game !== 'undefined') {
         game.onRightClick(world.x, world.y);
       }
-      return;
-    }
-
-    if (e.button === 1 || (e.button === 0 && e.altKey)) {
-      // Middle click or alt+click: pan
-      isPanning = true;
-      panStartX = e.clientX;
-      panStartY = e.clientY;
-      panCamStartX = Renderer.camera.targetX;
-      panCamStartY = Renderer.camera.targetY;
-      return;
-    }
-
-    if (e.button === 0) {
-      // Left click
-      if (typeof game !== 'undefined' && game.buildMode) {
-        // Place building
-        const world = Renderer.screenToWorld(mouseX, mouseY);
-        game.placeBuild(Math.floor(world.x), Math.floor(world.y));
-        return;
-      }
-
-      // Start box select
-      isBoxSelecting = true;
-      boxStartX = e.clientX;
-      boxStartY = e.clientY;
-      dragStartX = e.clientX;
-      dragStartY = e.clientY;
     }
   }
 
@@ -90,94 +57,49 @@ const Input = (() => {
     mouseWorldX = world.x;
     mouseWorldY = world.y;
 
-    if (isPanning) {
-      const dx = e.clientX - panStartX;
-      const dy = e.clientY - panStartY;
-      Renderer.camera.targetX = panCamStartX - dx;
-      Renderer.camera.targetY = panCamStartY - dy;
-      return;
-    }
-
-    if (isBoxSelecting) {
-      const box = document.getElementById('select-box');
-      const x1 = Math.min(boxStartX, e.clientX);
-      const y1 = Math.min(boxStartY, e.clientY);
-      const x2 = Math.max(boxStartX, e.clientX);
-      const y2 = Math.max(boxStartY, e.clientY);
-
-      if (x2 - x1 > 4 || y2 - y1 > 4) {
-        isDragging = true;
-        box.style.display = 'block';
-        box.style.left = x1 + 'px';
-        box.style.top = y1 + 'px';
-        box.style.width = (x2 - x1) + 'px';
-        box.style.height = (y2 - y1) + 'px';
-      }
-    }
-
     // Update build ghost
     if (typeof game !== 'undefined' && game.buildMode) {
       game.updateBuildGhost(Math.floor(world.x), Math.floor(world.y));
     }
 
-    // Update tooltip
     updateTooltip(world.x, world.y);
   }
 
   function onMouseUp(e) {
-    if (isPanning) {
-      isPanning = false;
-      return;
-    }
-
-    if (isBoxSelecting) {
-      isBoxSelecting = false;
-      const box = document.getElementById('select-box');
-      box.style.display = 'none';
-
-      if (isDragging) {
-        // Box selection
-        const x1 = Math.min(boxStartX, e.clientX);
-        const y1 = Math.min(boxStartY, e.clientY);
-        const x2 = Math.max(boxStartX, e.clientX);
-        const y2 = Math.max(boxStartY, e.clientY);
-
-        if (typeof game !== 'undefined') {
-          game.boxSelect(x1, y1, x2, y2);
-        }
-        isDragging = false;
-      } else {
-        // Single click
-        const world = Renderer.screenToWorld(mouseX, mouseY);
-        if (typeof game !== 'undefined') {
-          game.onClick(world.x, world.y, e.shiftKey);
-        }
-      }
-    }
+    // Not much needed for Stardew-style - clicks are in mousedown
   }
 
   function onWheel(e) {
     e.preventDefault();
-    const delta = e.deltaY > 0 ? -0.1 : 0.1;
+    const delta = e.deltaY > 0 ? -0.12 : 0.12;
     Renderer.zoomCamera(delta);
   }
 
   function onKeyDown(e) {
     keys[e.key.toLowerCase()] = true;
 
-    if (typeof game !== 'undefined') {
-      switch (e.key.toLowerCase()) {
-        case 'm': game.actionMove(); break;
-        case 'e': game.actionExplore(); break;
-        case 'h': game.actionHarvest(); break;
-        case 'b': game.toggleBuildMenu(); break;
-        case 'escape':
-          game.cancelAction();
-          break;
-        case 'f2':
-          game.toggleMarket();
-          break;
-      }
+    if (typeof game === 'undefined') return;
+
+    // Hotbar number keys
+    if (e.key >= '1' && e.key <= '9') {
+      game.selectHotbarSlot(parseInt(e.key) - 1);
+      return;
+    }
+
+    switch (e.key.toLowerCase()) {
+      case 'e': game.interact(); break;
+      case 'tab':
+        e.preventDefault();
+        game.toggleInventory();
+        break;
+      case 'f': game.toggleCraftingMenu(); break;
+      case 'b': game.toggleBuildMenu(); break;
+      case 'q': game.cycleTool(-1); break;
+      case 'r': game.cycleTool(1); break;
+      case 'escape': game.cancelAction(); break;
+      case 'm': game.toggleMapOverlay(); break;
+      case 'enter': game.toggleChat(); break;
+      case 'p': game.toggleMarket(); break;
     }
   }
 
@@ -189,10 +111,8 @@ const Input = (() => {
     const rect = e.target.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-
     const worldX = (mx / rect.width) * GameMap.MAP_W;
     const worldY = (my / rect.height) * GameMap.MAP_H;
-
     Renderer.centerOnTile(worldX, worldY);
   }
 
@@ -211,6 +131,22 @@ const Input = (() => {
       return;
     }
 
+    // Check for farm plot
+    const farmPlot = GameMap.getFarmPlot(tx, ty);
+    if (farmPlot) {
+      tooltip.style.display = 'block';
+      tooltip.style.left = (mouseX + 16) + 'px';
+      tooltip.style.top = (mouseY + 16) + 'px';
+      if (farmPlot.crop) {
+        const stageNames = ['Seed', 'Sprout', 'Growing', 'Mature', 'Ready to harvest!'];
+        tooltip.innerHTML = `<strong>${farmPlot.crop}</strong><br>${stageNames[farmPlot.stage]}` +
+          (farmPlot.watered ? '<br>Watered' : '<br>Needs water');
+      } else {
+        tooltip.textContent = 'Empty farm plot';
+      }
+      return;
+    }
+
     // Check for resource node
     const node = GameMap.getResourceNodeAt(tx, ty, 1.5);
     if (node) {
@@ -221,7 +157,8 @@ const Input = (() => {
         gemDeposit: 'Gem Deposit',
         stoneDeposit: 'Stone Deposit',
         woodPile: 'Forest',
-        teaPlant: 'Tea Plantation',
+        teaPlant: 'Wild Tea',
+        cinnamonTree: 'Cinnamon Tree',
         ruin: 'Ancient Ruins',
       };
       tooltip.innerHTML = `<strong>${typeNames[node.type] || node.type}</strong><br>` +
@@ -237,9 +174,13 @@ const Input = (() => {
       sand: 'Sandy Shore',
       grass: 'Grassland',
       jungle: 'Dense Jungle',
-      mountain: 'Mountain',
+      mountain: 'Misty Mountains',
       river: 'River',
       dirt: 'Cleared Ground',
+      ricePaddy: 'Rice Paddy',
+      teaHill: 'Tea Hillside',
+      farmSoil: 'Farm Plot',
+      farmSoilWet: 'Farm Plot (Watered)',
     };
 
     tooltip.style.display = 'block';
@@ -248,34 +189,55 @@ const Input = (() => {
     tooltip.textContent = tileDisplayNames[tileName] || tileName;
   }
 
-  // Edge scroll update (called each frame)
-  function updateEdgeScroll() {
+  // ── Movement (called each frame) ───────────────────────────────────────
+
+  function getMovement() {
     let dx = 0, dy = 0;
 
-    // Edge scroll
-    if (mouseX < EDGE_MARGIN) dx -= SCROLL_SPEED;
-    if (mouseX > window.innerWidth - EDGE_MARGIN) dx += SCROLL_SPEED;
-    if (mouseY < EDGE_MARGIN + 36) dy -= SCROLL_SPEED;
-    if (mouseY > window.innerHeight - EDGE_MARGIN) dy += SCROLL_SPEED;
+    // WASD / Arrow keys → isometric movement
+    const up = keys['w'] || keys['arrowup'];
+    const down = keys['s'] || keys['arrowdown'];
+    const left = keys['a'] || keys['arrowleft'];
+    const right = keys['d'] || keys['arrowright'];
 
-    // Keyboard scroll
-    if (keys['arrowleft'] || keys['a']) dx -= SCROLL_SPEED;
-    if (keys['arrowright'] || keys['d']) dx += SCROLL_SPEED;
-    if (keys['arrowup'] || keys['w']) dy -= SCROLL_SPEED;
-    if (keys['arrowdown'] || keys['s']) dy += SCROLL_SPEED;
+    // In isometric space, "up" on screen = move NW (x--, y--)
+    // "down" = SE (x++, y++), "left" = SW (x--, y++), "right" = NE (x++, y--)
+    if (up) { dx -= 1; dy -= 1; }
+    if (down) { dx += 1; dy += 1; }
+    if (left) { dx -= 1; dy += 1; }
+    if (right) { dx += 1; dy -= 1; }
 
-    if (dx !== 0 || dy !== 0) {
-      Renderer.moveCamera(dx, dy);
+    isMoving = dx !== 0 || dy !== 0;
+
+    if (isMoving) {
+      // Determine facing direction
+      if (dx > 0 && dy > 0) lastDirection = 0; // down (SE)
+      else if (dx < 0 && dy > 0) lastDirection = 1; // left (SW)
+      else if (dx < 0 && dy < 0) lastDirection = 2; // up (NW)
+      else if (dx > 0 && dy < 0) lastDirection = 3; // right (NE)
+      else if (dy > 0) lastDirection = 0;
+      else if (dy < 0) lastDirection = 2;
+      else if (dx > 0) lastDirection = 3;
+      else if (dx < 0) lastDirection = 1;
+
+      // Normalize diagonal movement
+      const len = Math.sqrt(dx * dx + dy * dy);
+      dx /= len;
+      dy /= len;
     }
+
+    return { dx, dy, moving: isMoving, direction: lastDirection };
   }
 
   return {
     init,
-    updateEdgeScroll,
+    getMovement,
     get mouseX() { return mouseX; },
     get mouseY() { return mouseY; },
     get mouseWorldX() { return mouseWorldX; },
     get mouseWorldY() { return mouseWorldY; },
+    get direction() { return lastDirection; },
+    get isMoving() { return isMoving; },
     keys,
   };
 })();
