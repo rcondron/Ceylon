@@ -254,19 +254,20 @@ const Renderer = (() => {
         const animFrame = op.moving ? Math.floor(frameCount / 4) : 0;
         const sprite = Sprites.getOtherPlayerSprite(op.direction || 0, animFrame, op.color || '#5090c0');
 
+        const cw = Sprites.CHAR_W * camera.zoom;
+        const ch = Sprites.CHAR_H * camera.zoom;
         ctx.drawImage(
           sprite,
-          screen.x - 12 * camera.zoom,
-          screen.y - 28 * camera.zoom - heightOffset,
-          24 * camera.zoom,
-          32 * camera.zoom
+          screen.x - cw / 2,
+          screen.y - ch + 4 * camera.zoom - heightOffset,
+          cw, ch
         );
 
         // Name tag
         ctx.fillStyle = 'rgba(0,0,0,0.4)';
         ctx.font = `${Math.max(8, 10 * camera.zoom)}px Georgia`;
         ctx.textAlign = 'center';
-        const nameY = screen.y - 34 * camera.zoom - heightOffset;
+        const nameY = screen.y - ch - 2 * camera.zoom - heightOffset;
         ctx.fillText(op.name || 'Player', screen.x + 1, nameY + 1);
         ctx.fillStyle = '#f0e8d8';
         ctx.fillText(op.name || 'Player', screen.x, nameY);
@@ -282,12 +283,13 @@ const Renderer = (() => {
       const animFrame = p.moving ? Math.floor(frameCount / 4) : 0;
       const sprite = Sprites.getPlayerSprite(p.direction || 0, animFrame, p.color || '#e8d0a0', p.tool);
 
+      const pcw = Sprites.CHAR_W * camera.zoom;
+      const pch = Sprites.CHAR_H * camera.zoom;
       ctx.drawImage(
         sprite,
-        screen.x - 12 * camera.zoom,
-        screen.y - 28 * camera.zoom - heightOffset,
-        24 * camera.zoom,
-        32 * camera.zoom
+        screen.x - pcw / 2,
+        screen.y - pch + 4 * camera.zoom - heightOffset,
+        pcw, pch
       );
 
       // Interaction indicator (tile highlight)

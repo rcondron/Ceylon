@@ -9,6 +9,76 @@ const Sprites = (() => {
   const TILE_W = 64;
   const TILE_H = 32;
 
+  // Character sprite dimensions (used by renderer for positioning)
+  const CHAR_W = 48;
+  const CHAR_H = 64;
+
+  // ── Sprite Sheet System ─────────────────────────────────────────────────
+  // Loads an external sprite sheet PNG for the player character.
+  // Falls back to procedural pixel art if the sheet fails to load.
+
+  const SHEET = {
+    image: null,
+    loaded: false,
+    cols: 6,       // frames per row
+    rows: 8,       // total rows in sheet
+    frameW: 0,     // auto-calculated on load
+    frameH: 0,
+    // Map game directions (0=S, 1=W, 2=N, 3=E) to sprite sheet rows.
+    // Adjust these if the sprite sheet layout differs.
+    directionRows: {
+      0: 0,   // South (front facing) → row 0
+      1: 1,   // West (front-left)    → row 1
+      2: 2,   // North (back facing)  → row 2
+      3: 4,   // East (front-right)   → row 4
+    },
+    idleFrame: 0,       // column index for idle pose
+    walkStart: 1,       // first walk frame column
+    walkEnd: 5,         // last walk frame column
+    sleepRow: 7,        // collapse/sleep animation row
+    specialRow: 6,      // special poses row (binoculars etc.)
+  };
+
+  // Attempt to load the character sprite sheet
+  (function loadCharacterSheet() {
+    const img = new Image();
+    img.onload = function () {
+      SHEET.image = img;
+      SHEET.frameW = Math.floor(img.width / SHEET.cols);
+      SHEET.frameH = Math.floor(img.height / SHEET.rows);
+      SHEET.loaded = true;
+      // Clear any cached procedural player sprites so sheet versions are used
+      for (const key of Object.keys(cache)) {
+        if (key.startsWith('player_') || key.startsWith('otherp_')) {
+          delete cache[key];
+        }
+      }
+      console.log(`Character sheet loaded: ${img.width}x${img.height}, frame: ${SHEET.frameW}x${SHEET.frameH}`);
+    };
+    img.onerror = function () {
+      console.log('Character sprite sheet not found, using procedural sprites.');
+    };
+    img.src = 'assets/character.png';
+  })();
+
+  // Extract a single frame from the sprite sheet and scale to CHAR_W x CHAR_H
+  function extractSheetFrame(row, col) {
+    const key = `sheet_${row}_${col}`;
+    if (cache[key]) return cache[key];
+
+    const c = createCanvas(CHAR_W, CHAR_H);
+    const ctx = c.getContext('2d');
+    ctx.imageSmoothingEnabled = true; // smooth scaling for detailed art
+    ctx.drawImage(
+      SHEET.image,
+      col * SHEET.frameW, row * SHEET.frameH,
+      SHEET.frameW, SHEET.frameH,
+      0, 0, CHAR_W, CHAR_H
+    );
+    cache[key] = c;
+    return c;
+  }
+
   function createCanvas(w, h) {
     const c = document.createElement('canvas');
     c.width = w;
@@ -1530,6 +1600,19 @@ const Sprites = (() => {
   }
 
   function getPlayerSprite(direction, frame, color, tool) {
+    if (SHEET.loaded) {
+      const row = SHEET.directionRows[direction] != null ? SHEET.directionRows[direction] : 0;
+      let col;
+      if (frame > 0) {
+        // Walking: cycle through walk frames
+        const walkRange = SHEET.walkEnd - SHEET.walkStart + 1;
+        col = SHEET.walkStart + (Math.floor(frame) % walkRange);
+      } else {
+        col = SHEET.idleFrame;
+      }
+      return extractSheetFrame(row, col);
+    }
+    // Fallback to procedural sprites
     const f = Math.floor(frame) % 8;
     const key = `player_${direction}_${f}_${color}_${tool || 'none'}`;
     if (!cache[key]) cache[key] = generatePlayerCharacter(direction, f, color, tool);
@@ -1537,6 +1620,17 @@ const Sprites = (() => {
   }
 
   function getOtherPlayerSprite(direction, frame, color) {
+    if (SHEET.loaded) {
+      const row = SHEET.directionRows[direction] != null ? SHEET.directionRows[direction] : 0;
+      let col;
+      if (frame > 0) {
+        const walkRange = SHEET.walkEnd - SHEET.walkStart + 1;
+        col = SHEET.walkStart + (Math.floor(frame) % walkRange);
+      } else {
+        col = SHEET.idleFrame;
+      }
+      return extractSheetFrame(row, col);
+    }
     const f = Math.floor(frame) % 8;
     const key = `otherp_${direction}_${f}_${color}`;
     if (!cache[key]) cache[key] = generateOtherPlayer(direction, f, color);
@@ -1582,7 +1676,10 @@ const Sprites = (() => {
   return {
     TILE_W,
     TILE_H,
+    CHAR_W,
+    CHAR_H,
     PAL,
+    SHEET,
     getTile,
     getTree,
     getPlayerSprite,
