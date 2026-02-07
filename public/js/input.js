@@ -87,7 +87,11 @@ const Input = (() => {
     }
 
     switch (e.key.toLowerCase()) {
-      case 'e': game.interact(); break;
+      case 'e':
+      case ' ':
+        e.preventDefault();
+        game.interact();
+        break;
       case 'tab':
         e.preventDefault();
         game.toggleInventory();

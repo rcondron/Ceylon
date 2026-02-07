@@ -11,7 +11,10 @@ const Sprites = (() => {
 
   // Character sprite dimensions (used by renderer for positioning)
   const CHAR_W = 48;
-  const CHAR_H = 64;
+  const CHAR_H = 76;
+  // How far (in CHAR_H units) the feet/ground-plane is from the sprite bottom.
+  // The renderer uses this to anchor the character to the tile.
+  const CHAR_FOOT_OFFSET = 6;
 
   // ── Sprite Sheet System ─────────────────────────────────────────────────
   // Loads an external sprite sheet PNG for the player character.
@@ -64,18 +67,27 @@ const Sprites = (() => {
     img.src = 'assets/character.png';
   })();
 
+  // Extra pixels to grab below each frame to capture legs/shadows that
+  // overflow past the row boundary in the sprite sheet.
+  const SHEET_OVERFLOW_Y = 30;
+
   // Extract a single frame from the sprite sheet and scale to CHAR_W x CHAR_H
   function extractSheetFrame(row, col) {
     const key = `sheet_${row}_${col}`;
     if (cache[key]) return cache[key];
+
+    const srcX = col * SHEET.frameW;
+    const srcY = row * SHEET.frameH;
+    // Grab the frame plus overflow, clamped to image bounds
+    const srcH = Math.min(SHEET.frameH + SHEET_OVERFLOW_Y, SHEET.image.height - srcY);
 
     const c = createCanvas(CHAR_W, CHAR_H);
     const ctx = c.getContext('2d');
     ctx.imageSmoothingEnabled = true; // smooth scaling for detailed art
     ctx.drawImage(
       SHEET.image,
-      col * SHEET.frameW, row * SHEET.frameH,
-      SHEET.frameW, SHEET.frameH,
+      srcX, srcY,
+      SHEET.frameW, srcH,
       0, 0, CHAR_W, CHAR_H
     );
     cache[key] = c;
@@ -1681,6 +1693,7 @@ const Sprites = (() => {
     TILE_H,
     CHAR_W,
     CHAR_H,
+    CHAR_FOOT_OFFSET,
     PAL,
     SHEET,
     getTile,

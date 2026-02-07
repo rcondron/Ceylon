@@ -256,10 +256,11 @@ const Renderer = (() => {
 
         const cw = Sprites.CHAR_W * camera.zoom;
         const ch = Sprites.CHAR_H * camera.zoom;
+        const footOff = (Sprites.CHAR_FOOT_OFFSET || 6) * camera.zoom;
         ctx.drawImage(
           sprite,
           screen.x - cw / 2,
-          screen.y - ch + 4 * camera.zoom - heightOffset,
+          screen.y - ch + footOff - heightOffset,
           cw, ch
         );
 
@@ -267,7 +268,7 @@ const Renderer = (() => {
         ctx.fillStyle = 'rgba(0,0,0,0.4)';
         ctx.font = `${Math.max(8, 10 * camera.zoom)}px Georgia`;
         ctx.textAlign = 'center';
-        const nameY = screen.y - ch - 2 * camera.zoom - heightOffset;
+        const nameY = screen.y - ch + footOff - 4 * camera.zoom - heightOffset;
         ctx.fillText(op.name || 'Player', screen.x + 1, nameY + 1);
         ctx.fillStyle = '#f0e8d8';
         ctx.fillText(op.name || 'Player', screen.x, nameY);
@@ -285,10 +286,11 @@ const Renderer = (() => {
 
       const pcw = Sprites.CHAR_W * camera.zoom;
       const pch = Sprites.CHAR_H * camera.zoom;
+      const pFootOff = (Sprites.CHAR_FOOT_OFFSET || 6) * camera.zoom;
       ctx.drawImage(
         sprite,
         screen.x - pcw / 2,
-        screen.y - pch + 4 * camera.zoom - heightOffset,
+        screen.y - pch + pFootOff - heightOffset,
         pcw, pch
       );
 
